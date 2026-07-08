@@ -1,0 +1,17 @@
+[package]
+name = "frack"
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-or-later"
+
+[dependencies]
+cairo-rs = { version = "0.22.0", features = ["png"] }
+cpal = "0.18.1"
+dirs = "6.0.0"
+gtk4 = { version = "0.11.4", features = ["v4_18"] }
+lopdf = "0.43.0"
+pitch-detection = "0.3.0"
+poppler-rs = { version = "0.26.0", features = ["v25_10"] }
+serde = { version = "1.0.228", features = ["derive"] }
+toml = "1.1.2"
+walkdir = "2.5.0"

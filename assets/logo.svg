@@ -1,0 +1,110 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <!--
+    frack logo: a penguin in tails holding sheet music (the opening of
+    the Ride of the Valkyries). Original artwork.
+    SPDX-FileCopyrightText: 2026 matthias
+    SPDX-License-Identifier: CC-BY-SA-4.0
+  -->
+
+  <!-- coat tails -->
+  <path d="M 168 340 Q 150 430 108 496 L 196 462 Q 176 400 180 340 Z" fill="#26262e"/>
+  <path d="M 344 340 Q 362 430 404 496 L 316 462 Q 336 400 332 340 Z" fill="#26262e"/>
+
+  <!-- feet -->
+  <path d="M 200 452 q -30 26 -6 34 q 36 10 52 -12 l -8 -28 Z" fill="#f6a41c"/>
+  <path d="M 312 452 q 30 26 6 34 q -36 10 -52 -12 l 8 -28 Z" fill="#f6a41c"/>
+
+  <!-- body -->
+  <path d="M 256 48 C 190 48 158 102 158 160 C 158 208 140 250 140 320
+           C 140 410 192 472 256 472 C 320 472 372 410 372 320
+           C 372 250 354 208 354 160 C 354 102 322 48 256 48 Z" fill="#16161a"/>
+
+  <!-- shirt -->
+  <path d="M 256 212 C 218 212 196 252 194 310 C 192 378 216 444 256 444
+           C 296 444 320 378 318 310 C 316 252 294 212 256 212 Z" fill="#ffffff"/>
+  <circle cx="256" cy="262" r="5" fill="#c9c9d1"/>
+  <circle cx="256" cy="300" r="5" fill="#c9c9d1"/>
+  <circle cx="256" cy="338" r="5" fill="#c9c9d1"/>
+
+  <!-- lapels -->
+  <path d="M 222 214 C 200 262 194 330 204 396 L 176 320 C 168 258 186 226 222 214 Z" fill="#2b2b33"/>
+  <path d="M 290 214 C 312 262 318 330 308 396 L 336 320 C 344 258 326 226 290 214 Z" fill="#2b2b33"/>
+
+  <!-- sheet music under the right wing: the Ride of the Valkyries
+       gallop motif (Wagner, public domain), drawn from scratch -->
+  <g transform="rotate(6 396 330)">
+    <rect x="344" y="248" width="157" height="150" rx="7" fill="#ffffff" stroke="#c9c9d1" stroke-width="3"/>
+    <!-- title squiggle -->
+    <line x1="392" y1="266" x2="458" y2="266" stroke="#c9c9d1" stroke-width="5" stroke-linecap="round"/>
+    <!-- staff (bass clef lines, top to bottom: A3 F3 D3 B2 G2) -->
+    <g stroke="#9a9aa4" stroke-width="2.5">
+      <line x1="384" y1="296" x2="497" y2="296"/>
+      <line x1="384" y1="308" x2="497" y2="308"/>
+      <line x1="384" y1="320" x2="497" y2="320"/>
+      <line x1="384" y1="332" x2="497" y2="332"/>
+      <line x1="384" y1="344" x2="497" y2="344"/>
+    </g>
+    <!-- Walkürenritt, after: \partial 8 fis,8 | h,8. fis,16 h,8 dis4. h,4. |
+         no clef/key for clarity at logo size. fis = space below the
+         staff, h = 2nd line from bottom, dis = middle line -->
+    <g fill="#16161a">
+      <!-- pickup: fis eighth with flag (clear of the wing) -->
+      <ellipse cx="401" cy="350" rx="5.2" ry="4" transform="rotate(-20 401 350)"/>
+      <rect x="404.8" y="320" width="2.4" height="30"/>
+      <path d="M 407.2 320 C 416 325 417.5 335 411.5 342 C 415 334 411 326 407.2 327 Z"/>
+      <!-- barline after the pickup -->
+      <rect x="413" y="296" width="2" height="48"/>
+      <!-- beamed group: h dotted-8th, fis 16th, h 8th -->
+      <ellipse cx="424" cy="332" rx="5.2" ry="4" transform="rotate(-20 424 332)"/>
+      <rect x="427.8" y="305" width="2.4" height="27"/>
+      <circle cx="433.5" cy="329.5" r="2.3"/>
+      <ellipse cx="437" cy="350" rx="5.2" ry="4" transform="rotate(-20 437 350)"/>
+      <rect x="440.8" y="305" width="2.4" height="45"/>
+      <ellipse cx="450" cy="332" rx="5.2" ry="4" transform="rotate(-20 450 332)"/>
+      <rect x="453.8" y="305" width="2.4" height="27"/>
+      <!-- main beam across all three stems -->
+      <path d="M 427.8 305 L 456.2 305 L 456.2 310 L 427.8 310 Z"/>
+      <!-- 16th partial beam, hanging on the fis stem, pointing left -->
+      <path d="M 431 314 L 440.6 314 L 440.6 319 L 431 319 Z"/>
+      <!-- d dotted quarter (middle line, dot in the space above) -->
+      <ellipse cx="468" cy="320" rx="5.2" ry="4" transform="rotate(-20 468 320)"/>
+      <rect x="471.8" y="292" width="2.4" height="28"/>
+      <circle cx="477.5" cy="317.5" r="2.3"/>
+      <!-- final h dotted quarter (2nd line, dot in the space above) -->
+      <ellipse cx="482" cy="332" rx="5.2" ry="4" transform="rotate(-20 482 332)"/>
+      <rect x="485.8" y="304" width="2.4" height="28"/>
+      <circle cx="491.5" cy="329.5" r="2.3"/>
+      <!-- final barline -->
+      <rect x="497" y="296" width="2" height="48"/>
+    </g>
+    <!-- accent > under beat 1 (the h) -->
+    <path d="M 418 356 L 430 359 L 418 362" fill="none" stroke="#16161a"
+          stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+    <!-- fortissimo ff under the pickup fis. Each f: top terminal curls
+         right, stem leans forward, descender curls left, crossbar. -->
+    <g stroke="#16161a" fill="none" stroke-width="2.3" stroke-linecap="round">
+      <path d="M 400 356 C 397 354 393.5 356 394.5 360 L 390 378 C 389 382 385.5 383 383 381"/>
+      <line x1="387" y1="368" x2="397" y2="366"/>
+      <path d="M 411 356 C 408 354 404.5 356 405.5 360 L 401 378 C 400 382 396.5 383 394 381"/>
+      <line x1="398" y1="368" x2="408" y2="366"/>
+    </g>
+  </g>
+
+  <!-- wing over the sheet (slim, so clef and notes stay visible) -->
+  <path d="M 354 232 C 388 266 396 320 378 382 C 358 346 350 292 346 252 Z" fill="#16161a"/>
+
+  <!-- face -->
+  <ellipse cx="224" cy="140" rx="34" ry="42" fill="#ffffff"/>
+  <ellipse cx="288" cy="140" rx="34" ry="42" fill="#ffffff"/>
+  <circle cx="232" cy="140" r="12" fill="#16161a"/>
+  <circle cx="280" cy="140" r="12" fill="#16161a"/>
+  <circle cx="236" cy="135" r="4" fill="#ffffff"/>
+  <circle cx="284" cy="135" r="4" fill="#ffffff"/>
+  <path d="M 226 172 Q 256 160 286 172 Q 256 204 226 172 Z" fill="#f6a41c"/>
+
+  <!-- bow tie -->
+  <path d="M 250 208 L 214 194 Q 206 208 214 222 Z" fill="#ffffff" stroke="#c9c9d1" stroke-width="3"/>
+  <path d="M 262 208 L 298 194 Q 306 208 298 222 Z" fill="#ffffff" stroke="#c9c9d1" stroke-width="3"/>
+  <circle cx="256" cy="208" r="9" fill="#ffffff" stroke="#c9c9d1" stroke-width="3"/>
+</svg>
