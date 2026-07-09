@@ -31,5 +31,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (german/english), accidental style (flat/sharp) and fullscreen start.
 - Packaging as a Nix flake: package, overlay, development shell, and an
   SBOM generator (`nix run .#sbom`).
+- Bundled public domain sample scores (Brahms, Symphony No. 1, trombone
+  parts) in `sample-scores/`, and an optional command line argument
+  naming a library directory that overrides `root_dir` for the run —
+  together they allow trying frack without any setup:
+  `nix run . -- ./sample-scores`.
 
 [Unreleased]: https://github.com/matthiasdotsh/frack/commits/main

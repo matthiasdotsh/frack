@@ -37,7 +37,8 @@ including licenses.
 `~/.config/frack/config.toml` (created on first start):
 
 ```toml
-root_dir = "/home/ms/Noten"   # searched recursively for *.pdf
+root_dir = "/home/ms/Noten"   # searched recursively for *.pdf; a directory
+                              # passed on the command line takes precedence
 pen_width = 1.5
 pen_color = "#cc0000"
 a4 = 443.0                    # tuner reference pitch in Hz
@@ -45,6 +46,19 @@ note_names = "english"        # default is "german": H = english B, B = english 
 accidentals = "sharp"         # D#/Dis instead of the default "flat" (Eb/Es)
 start_fullscreen = false      # default true: open in fullscreen
 ```
+
+## Sample scores
+
+The repository bundles a few public domain orchestral trombone parts
+(Brahms, Symphony No. 1) in [`sample-scores/`](sample-scores/README.md)
+so you can try frack without any setup – start it with
+`nix run . -- ./sample-scores` (or `cargo run --release -- ./sample-scores`
+without Nix).
+The optional argument is a library directory that overrides `root_dir`
+from the config for this run.
+
+Provenance and license details for each file are
+documented in that folder's README.
 
 ## Keys & touch
 

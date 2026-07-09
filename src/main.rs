@@ -7,18 +7,42 @@ use gtk::glib;
 use gtk::prelude::*;
 use gtk4 as gtk;
 use std::cell::RefCell;
+use std::path::PathBuf;
 use std::rc::Rc;
 
 fn main() -> glib::ExitCode {
+    // Optional library directory as the only argument; it overrides
+    // root_dir from the config for this run (nothing is written to the
+    // config). Handy for e.g. `frack sample-scores`.
+    let mut args = std::env::args().skip(1);
+    let root_override = match args.next().as_deref() {
+        Some("-h" | "--help") => {
+            println!("Usage: frack [LIBRARY_DIR]");
+            println!();
+            println!("LIBRARY_DIR overrides root_dir from the config for this run.");
+            return glib::ExitCode::SUCCESS;
+        }
+        Some(dir) => {
+            // Canonicalize so relative paths survive whatever GTK does
+            // with the working directory.
+            Some(std::fs::canonicalize(dir).unwrap_or_else(|_| PathBuf::from(dir)))
+        }
+        None => None,
+    };
+
     let app = gtk::Application::builder()
         .application_id("app.frack.Frack")
         .build();
-    app.connect_activate(build_ui);
-    app.run()
+    app.connect_activate(move |app| build_ui(app, root_override.clone()));
+    // GTK must not parse our command line (it would reject LIBRARY_DIR).
+    app.run_with_args::<String>(&[])
 }
 
-fn build_ui(app: &gtk::Application) {
-    let (cfg, cfg_created) = config::load_or_create();
+fn build_ui(app: &gtk::Application, root_override: Option<PathBuf>) {
+    let (mut cfg, cfg_created) = config::load_or_create();
+    if let Some(dir) = root_override {
+        cfg.root_dir = dir;
+    }
     let cfg = Rc::new(cfg);
 
     let window = gtk::ApplicationWindow::builder()
