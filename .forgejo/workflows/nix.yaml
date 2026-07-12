@@ -1,0 +1,11 @@
+name: Nix
+on: [push, pull_request]
+
+jobs:
+  check:
+    runs-on: native
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - run: nix flake check
+

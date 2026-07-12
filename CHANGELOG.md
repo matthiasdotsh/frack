@@ -45,5 +45,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `assets/screenshots/`; a companion check (`screenshots-up-to-date`)
   makes `nix flake check` fail when the committed images differ from
   what the UI renders.
+- Forgejo Actions workflow running `nix flake check` on every push and
+  pull request, so the package build, the VM screenshot test and the
+  screenshot freshness check gate all changes.
 
 [Unreleased]: https://github.com/matthiasdotsh/frack/commits/main
