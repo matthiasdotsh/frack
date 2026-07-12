@@ -9,6 +9,27 @@ with a stylus – burned directly into the PDF file. No database: the
 library is just a directory, setlists are folders of symlinks, and sync
 and versioning are left to external tools (git-annex, Syncthing).
 
+## Screenshots
+
+| Library | Freehand annotation |
+| --- | --- |
+| ![Library](assets/screenshots/library.png) | ![Annotation](assets/screenshots/annotation.png) |
+
+| Half-page turn with tuner | Touch overlay (middle tap) |
+| --- | --- |
+| ![Half-page turn with tuner](assets/screenshots/tuner-half-page.png) | ![Overlay](assets/screenshots/overlay.png) |
+
+In the half-page shot the top half of the next page has already
+appeared, while the bottom half of the current page stays visible until
+you finish it.
+
+The screenshots are captured by a NixOS VM integration test
+(`checks.<system>.screenshots`) that drives the real UI — including a
+generated sine wave played into a loopback microphone for the tuner —
+and are copied into the repository with `nix run .#update-screenshots`.
+A second check compares the committed images against what the test
+currently renders, so `nix flake check` fails if they go stale.
+
 ## Build & Run
 
 With Nix:

@@ -36,5 +36,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   naming a library directory that overrides `root_dir` for the run —
   together they allow trying frack without any setup:
   `nix run . -- ./sample-scores`.
+- NixOS VM integration test (`checks.<system>.screenshots`) that boots
+  frack in a kiosk and captures the README screenshots by driving the
+  real UI: searching, opening a part, half-page turns, the touch
+  overlay, freehand annotations drawn with pointer strokes, and the
+  tuner fed by a generated sine wave through an ALSA loopback
+  microphone. `nix run .#update-screenshots` refreshes
+  `assets/screenshots/`; a companion check (`screenshots-up-to-date`)
+  makes `nix flake check` fail when the committed images differ from
+  what the UI renders.
 
 [Unreleased]: https://github.com/matthiasdotsh/frack/commits/main

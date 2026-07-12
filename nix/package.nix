@@ -13,6 +13,7 @@
   poppler,
   alsa-lib,
   adwaita-icon-theme,
+  librsvg,
 }:
 
 rustPlatform.buildRustPackage (finalAttrs: {
@@ -45,7 +46,17 @@ rustPlatform.buildRustPackage (finalAttrs: {
     poppler # poppler-glib
     alsa-lib # audio input for the tuner (cpal)
     adwaita-icon-theme # symbolic icons for the header/overlay buttons
+    librsvg # gdk-pixbuf loader for the symbolic SVG icons
   ];
+
+  # wrapGAppsHook4 wires up schemas and pixbuf loaders but not the icon
+  # theme; without this, minimal environments (kiosks, the VM test)
+  # render every button as the image-missing fallback.
+  preFixup = ''
+    gappsWrapperArgs+=(
+      --prefix XDG_DATA_DIRS : "${adwaita-icon-theme}/share"
+    )
+  '';
 
   # Desktop file and icon are named after the GTK application id so the
   # desktop environment associates the running window with them.
