@@ -672,7 +672,10 @@ impl Viewer {
             let w = w as f64;
             let h = h as f64;
             let sf = da.scale_factor() as f64;
-            cr.set_source_rgb(0.13, 0.13, 0.13);
+            // Fill the whole area with paper white so the letterbox around
+            // a fitted page matches the page itself instead of showing dark
+            // bars (most visible for a portrait page on a portrait screen).
+            cr.set_source_rgb(1.0, 1.0, 1.0);
             let _ = cr.paint();
             {
                 let mut guard = v.state.borrow_mut();
@@ -684,8 +687,8 @@ impl Viewer {
                     ViewPos::Split(n) => {
                         // Top: upper half of the next page; bottom: lower half
                         // of the current page, separated by a line.
-                        draw_half_page(cr, st, &v.cfg, n + 1, true, w, 0.0, h / 2.0, sf);
-                        draw_half_page(cr, st, &v.cfg, n, false, w, h / 2.0, h, sf);
+                        draw_half_page(cr, st, &v.cfg, n + 1, w, 0.0, h / 2.0, sf);
+                        draw_half_page(cr, st, &v.cfg, n, w, h / 2.0, h, sf);
                         cr.set_source_rgb(0.4, 0.4, 0.4);
                         cr.set_line_width(2.0);
                         cr.move_to(0.0, h / 2.0);
@@ -1074,7 +1077,7 @@ fn render_zoom_view(st: &mut DocState, n: usize, w: f64, h: f64, sf: f64) {
     {
         let Ok(cr) = cairo::Context::new(&surface) else { return };
         cr.scale(sf, sf);
-        cr.set_source_rgb(0.13, 0.13, 0.13);
+        cr.set_source_rgb(1.0, 1.0, 1.0);
         let _ = cr.paint();
         cr.translate(ox, oy);
         cr.scale(scale, scale);
@@ -1275,15 +1278,17 @@ fn draw_full_page(
     cr.restore().ok();
 }
 
-/// Draws the top (`top == true`) or bottom half of page `n` into the
-/// region y0..y1 of the drawing area.
+/// Draws page `n` clipped to the region y0..y1 of the drawing area,
+/// positioned exactly as the centered full-page view would place it. With
+/// the two regions being the top and bottom half of the area, the split at
+/// region_h lands on the page's vertical midline, so completing a
+/// half-page turn (split → full) does not shift the page.
 #[allow(clippy::too_many_arguments)]
 fn draw_half_page(
     cr: &cairo::Context,
     st: &mut DocState,
     cfg: &Config,
     n: usize,
-    top: bool,
     w: f64,
     y0: f64,
     y1: f64,
@@ -1292,14 +1297,12 @@ fn draw_half_page(
     let Some(page) = st.doc.page(n as i32) else { return };
     let (pw, ph) = page.size();
     let region_h = y1 - y0;
-    let scale = (w / pw).min(region_h / (ph / 2.0));
-    let ox = (w - pw * scale) / 2.0;
-    // Top half: align the page start with the top; bottom half: align the
-    // page end with the bottom so nothing gets cut off.
-    let oy = if top { y0 } else { y1 - ph * scale };
-    // Half a page in half the area = the same scale as a full page in the
-    // full area (2·region_h) – so the full-view bitmap fits.
-    ensure_cached(st, n, w, 2.0 * region_h, sf);
+    // Half a page in half the area uses the same fit as a full page in the
+    // full area (height 2·region_h), so the cached full-view bitmap fits
+    // and the page lands at the identical position as draw_full_page.
+    let full_h = 2.0 * region_h;
+    let (scale, ox, oy) = full_layout(w, full_h, pw, ph);
+    ensure_cached(st, n, w, full_h, sf);
     cr.save().ok();
     cr.rectangle(0.0, y0, w, region_h);
     cr.clip();
@@ -1379,13 +1382,13 @@ mod tests {
             cairo::ImageSurface::create(cairo::Format::ARgb32, w as i32, h as i32).unwrap();
         {
             let cr = cairo::Context::new(&surface).unwrap();
-            cr.set_source_rgb(0.13, 0.13, 0.13);
+            cr.set_source_rgb(1.0, 1.0, 1.0);
             cr.paint().unwrap();
             match st.pos {
                 ViewPos::Full(n) => draw_full_page(&cr, st, cfg, n, w, h, 1.0),
                 ViewPos::Split(n) => {
-                    draw_half_page(&cr, st, cfg, n + 1, true, w, 0.0, h / 2.0, 1.0);
-                    draw_half_page(&cr, st, cfg, n, false, w, h / 2.0, h, 1.0);
+                    draw_half_page(&cr, st, cfg, n + 1, w, 0.0, h / 2.0, 1.0);
+                    draw_half_page(&cr, st, cfg, n, w, h / 2.0, h, 1.0);
                 }
             }
         }

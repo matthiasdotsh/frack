@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Half-page turns no longer shift the page: the split view now uses the
+  same centered layout as the full page, so its divider falls on the
+  page's vertical midline and completing a turn keeps the page in place.
+- Portrait pages no longer show black letterbox bars; the area around a
+  fitted page is filled with paper white to match the page.
+
 ## [0.1.0] - 2026-07-12
 
 ### Added
