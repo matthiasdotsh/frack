@@ -1,0 +1,25 @@
+# GitHub mirror of .forgejo/workflows/nix.yaml. The Forgejo runner is a
+# `native` NixOS host that already has Nix and KVM; a GitHub-hosted runner
+# has neither, so this variant additionally installs Nix and grants access
+# to /dev/kvm (the screenshots VM test needs KVM to finish within the
+# timeout instead of falling back to slow TCG emulation).
+name: Nix
+on: [push, pull_request]
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      # GitHub's Linux runners ship /dev/kvm, but the runner user cannot
+      # open it by default; this udev rule makes it accessible so the
+      # NixOS VM test runs hardware-accelerated.
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      # Installs Nix with flakes and nix-command already enabled.
+      - uses: DeterminateSystems/nix-installer-action@main
+      - run: nix flake check

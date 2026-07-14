@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- GitHub Actions workflow mirroring the Forgejo CI: it installs Nix and
+  grants access to /dev/kvm, then runs `nix flake check` (including the
+  NixOS VM screenshot test) on every push and pull request.
+
 ### Fixed
 
 - Half-page turns no longer shift the page: the split view now uses the
