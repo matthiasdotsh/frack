@@ -340,14 +340,15 @@ testers.runNixOSTest {
     with subtest("a middle tap opens the touch overlay"):
         click_at(400, 640)
 
-        # The overlay's action buttons render as bright icons over the
-        # OSD bar anchored to the window bottom — that region is the
-        # uniform dark gray (RGB 33) letterbox bar below the page, so
-        # any bright pixel there means the overlay is open (its labels
-        # are too small for OCR).
+        # The overlay is an OSD bar with its own dark translucent
+        # background anchored to the window bottom. Below the fitted page
+        # that region is now plain paper white (the letterbox), so any
+        # dark pixel there means the overlay has opened (its labels are
+        # too small for OCR). Gating on this also makes the screenshot
+        # wait until the bar has actually rendered.
         def overlay_open(_last_try: bool) -> bool:
             data = probe_image().crop((25, 1172, 400, 1270)).tobytes()
-            return any(b > 90 for b in data)
+            return any(b < 90 for b in data)
 
         retry(overlay_open)
         park_cursor()  # moving the pointer does not close the overlay
