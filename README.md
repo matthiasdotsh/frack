@@ -30,24 +30,53 @@ and are copied into the repository with `nix run .#update-screenshots`.
 A second check compares the committed images against what the test
 currently renders, so `nix flake check` fails if they go stale.
 
-## Build & Run
+## Run
 
-With Nix:
+Nix is the primary, supported way to run frack — it builds the exact
+pinned dependency closure on any distribution, so nothing else needs to
+be installed:
+
 ```sh
-nix build          # package
-nix run            # build and start
+nix run github:matthiasdotsh/frack  # uses the library from ~/.config/frack/config.toml
+nix run github:matthiasdotsh/frack -- /path/to/scores  # or a directory you pass
 ```
 
-For development, `direnv allow` activates the dev shell automatically
-(or use `nix develop`), then `cargo build` / `cargo test` as usual.
+### In an existing Nix configuration
 
+Add frack as a flake input and apply its overlay, which provides
+`pkgs.frack`:
+
+```nix
+inputs.frack.url = "github:matthiasdotsh/frack";
+# ...
+nixpkgs.overlays = [ inputs.frack.overlays.default ];
+environment.systemPackages = [ pkgs.frack ];
+```
+
+### AppImage
+
+For a single self-contained file (no Nix, no system dependencies), bundle
+one from the flake:
+```sh
+nix bundle --bundler github:ralismark/nix-appimage .#default -o frack.AppImage
+```
+The result is directly executable `./frack.AppImage`. Note that an
+AppImage freezes the dependencies of the release it was built from.
+
+## Development
+
+Using the dev shell defined in `flake.nix` is recommended: `direnv allow`
+activates it automatically (or run `nix develop`), then `cargo build` /
+`cargo test` as usual. Try your build against the bundled sample scores
+with `nix run . -- ./sample-scores` (see [Sample scores](#sample-scores)).
+
+Without Nix, install the packages the dev shell lists (GTK4, poppler and
+ALSA plus the Rust toolchain — all packaged by every major distribution)
+with the package manager of your choice, then build from source:
 ```sh
 cargo build --release
 ./target/release/frack
 ```
-To use the package in another Nix configuration, add this repo as a
-flake input and either take `packages.${system}.default` or apply
-`overlays.default` (provides `pkgs.frack`).
 
 `nix run .#sbom` writes `frack.sbom.cdx.json`, a CycloneDX SBOM
 covering the full Nix runtime closure and all (transitive) Rust crates
