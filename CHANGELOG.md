@@ -15,6 +15,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The library scan now skips hidden files and directories, so a `root_dir`
+  that also holds a git-annex repository or Syncthing state lists the real
+  scores (via their working-tree symlinks) instead of the `.git` or
+  `.stversions` internals (e.g. content-addressed annex blobs).
 - Half-page turns no longer shift the page: the split view now uses the
   same centered layout as the full page, so its divider falls on the
   page's vertical midline and completing a turn keeps the page in place.

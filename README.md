@@ -68,6 +68,11 @@ accidentals = "sharp"         # D#/Dis instead of the default "flat" (Eb/Es)
 start_fullscreen = false      # default true: open in fullscreen
 ```
 
+Hidden files and directories are skipped while scanning, so a `root_dir`
+that also contains a git-annex repository or Syncthing state lists your
+scores (through their working-tree symlinks) instead of the `.git` or
+`.stversions` internals.
+
 ## Sample scores
 
 The repository bundles a few public domain orchestral trombone parts
