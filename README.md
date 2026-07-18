@@ -82,6 +82,7 @@ Add frack as a flake input and apply its overlay, which provides
 
 ```nix
 inputs.frack.url = "github:matthiasdotsh/frack";
+# or pin a tagged release: "github:matthiasdotsh/frack/0.2.0"
 # ...
 nixpkgs.overlays = [ inputs.frack.overlays.default ];
 environment.systemPackages = [ pkgs.frack ];
