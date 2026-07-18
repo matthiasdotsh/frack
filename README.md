@@ -6,8 +6,8 @@ A penguin in tails for your music stand: **frack** is a sheet music
 viewer for Linux (GTK4/Rust). Half-page turns (the next page's top half
 appears first), foot pedal support (Page Up/Down), freehand annotations
 with a stylus – burned directly into the PDF file. No database: the
-library is just a directory, setlists are folders of symlinks, and sync
-and versioning are left to external tools (git-annex, Syncthing).
+library is just a directory, and sync and versioning are left to
+external tools (git-annex, Syncthing).
 
 ## Screenshots
 
@@ -29,6 +29,40 @@ generated sine wave played into a loopback microphone for the tuner —
 and are copied into the repository with `nix run .#update-screenshots`.
 A second check compares the committed images against what the test
 currently renders, so `nix flake check` fails if they go stale.
+
+## Design goals
+
+After many years of using various sheet music apps on both iOS and
+Android, these are my convictions about how a music-stand app should
+behave, and what frack grew out of:
+
+- **A native Linux app.** GTK4/Rust, built for the Linux desktop — not a
+  web app in a wrapper and not an Android app running in Waydroid. It
+  starts fullscreen, so nothing but the score is between you and the
+  music.
+- **Half-page turns.** The top half of the next page appears while the
+  bottom half of the current one stays visible, so you turn ahead without
+  losing the line you are playing.
+- **Turning pages with a Bluetooth foot switch.** Both hands are busy
+  playing, so a foot pedal turns the pages. I tried many; I'm happy with
+  the PageFlip Firefly: it works both wired and over Bluetooth, runs on
+  plain 2×AA batteries you can swap right before a concert, has a
+  dedicated switch per function whose state you can see, and its LEDs are
+  easy to tape over so nothing blinks distractingly on stage.
+- **Your files stay yours.** frack does not manage, import or lock away
+  your scores — no cage, no file database. You point it at a directory;
+  how that directory is organised and synced (NextCloud, git-annex,
+  Syncthing, …) is entirely up to you and invisible to the app.
+- **Annotations live in the PDF.** Freehand marks are burned straight
+  into the file, not stored in a database you lose when you switch apps,
+  so your annotated scores stay portable. (Strokes can be undone before
+  they are saved; erasing annotations already burned into the file is not
+  possible yet.)
+- **One device on the stand.** No juggling a tablet for the score and a
+  phone for a tuner: the tuner is built in and can stay visible the whole
+  time, not only while tuning.
+- **Configured by a file, not menus.** Settings live in
+  `~/.config/frack/config.toml`; there is no in-app preferences screen.
 
 ## Run
 
@@ -126,3 +160,17 @@ fullscreen – everything works without a keyboard. Pinch with two fingers to zo
 for precise annotations) and pan; pinch out to return to the fitted
 view – page turns also reset the zoom. Annotations are saved on page
 turn and on exit – after that, strokes are part of the PDF.
+
+## Roadmap
+
+Ideas I plan to add, not yet implemented:
+
+- **Setlists** — ordered programmes for a rehearsal or concert, likely
+  built from symlinks so they stay plain files that fit the "your files
+  stay yours" model.
+- **Removing annotations** — because strokes are burned into the PDF,
+  this will probably be a white "pen" that paints over existing marks
+  rather than a true eraser.
+- **Quickly receiving scores from others** (feasibility unclear) — a
+  workflow to get a colleague's part on the spot, e.g. something
+  AirDrop-like.
