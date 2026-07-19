@@ -5,9 +5,9 @@
 A penguin in tails for your music stand: **frack** is a sheet music
 viewer for Linux (GTK4/Rust). Half-page turns (the next page's top half
 appears first), foot pedal support (Page Up/Down), freehand annotations
-with a stylus – burned directly into the PDF file. No database: the
-library is just a directory, and sync and versioning are left to
-external tools (git-annex, Syncthing).
+with a stylus – saved into the PDF file as standard ink annotations. No
+database: the library is just a directory, and sync and versioning are
+left to external tools (git-annex, Syncthing).
 
 ## Screenshots
 
@@ -53,11 +53,11 @@ behave, and what frack grew out of:
   your scores — no cage, no file database. You point it at a directory;
   how that directory is organised and synced (NextCloud, git-annex,
   Syncthing, …) is entirely up to you and invisible to the app.
-- **Annotations live in the PDF.** Freehand marks are burned straight
-  into the file, not stored in a database you lose when you switch apps,
-  so your annotated scores stay portable. (Strokes can be undone before
-  they are saved; erasing annotations already burned into the file is not
-  possible yet.)
+- **Annotations live in the PDF.** Freehand marks are saved into the
+  file itself as standard PDF ink annotations (ISO 32000), not in a
+  database you lose when you switch apps — so your annotated scores stay
+  portable, and any PDF program can display the marks or delete
+  individual strokes again.
 - **One device on the stand.** No juggling a tablet for the score and a
   phone for a tuner: the tuner is built in and can stay visible the whole
   time, not only while tuning.
@@ -160,7 +160,16 @@ jumps in long PDFs) and touch buttons for back, pen, undo, tuner and
 fullscreen – everything works without a keyboard. Pinch with two fingers to zoom in (e.g.
 for precise annotations) and pan; pinch out to return to the fitted
 view – page turns also reset the zoom. Annotations are saved on page
-turn and on exit – after that, strokes are part of the PDF.
+turn and on exit – as standard PDF ink annotations, so any PDF editor
+(e.g. Okular) can delete or move individual strokes afterwards. To strip
+them all from the command line:
+
+```sh
+gs -o clean.pdf -sDEVICE=pdfwrite -dPreserveAnnots=false -dShowAnnots=false in.pdf
+```
+
+(Note that Ghostscript rewrites the whole file and drops *all*
+annotation types, including hyperlinks.)
 
 ## Roadmap
 
@@ -169,9 +178,9 @@ Ideas I plan to add, not yet implemented:
 - **Setlists** — ordered programmes for a rehearsal or concert, likely
   built from symlinks so they stay plain files that fit the "your files
   stay yours" model.
-- **Removing annotations** — because strokes are burned into the PDF,
-  this will probably be a white "pen" that paints over existing marks
-  rather than a true eraser.
+- **Removing annotations in frack** — strokes are standard ink
+  annotations, so any PDF editor can already delete them; what is
+  missing is an eraser tool inside frack itself.
 - **Quickly receiving scores from others** (feasibility unclear) — a
   workflow to get a colleague's part on the spot, e.g. something
   AirDrop-like.

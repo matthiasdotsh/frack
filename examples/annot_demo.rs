@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 matthias
 
-//! Creates a test PDF (2 pages, page 2 with /Rotate 90), burns some
-//! strokes into it and saves the result. Render with `pdftoppm` for a
-//! visual check. Usage: burn_demo <output directory>
+//! Creates a test PDF (2 pages, page 2 with /Rotate 90), saves some
+//! strokes into it as ink annotations. Render with `pdftoppm` for a
+//! visual check. Usage: annot_demo <output directory>
 
 use lopdf::{dictionary, Document, Object, Stream};
-use frack::burn::{burn_strokes, Stroke, StrokePoint};
+use frack::annot::{save_strokes, Stroke, StrokePoint};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
@@ -24,7 +24,7 @@ fn main() {
     let dir = PathBuf::from(
         std::env::args()
             .nth(1)
-            .expect("Aufruf: burn_demo <ausgabeverzeichnis>"),
+            .expect("Aufruf: annot_demo <ausgabeverzeichnis>"),
     );
     std::fs::create_dir_all(&dir).unwrap();
     let pdf_path = dir.join("demo.pdf");
@@ -103,6 +103,6 @@ fn main() {
         }],
     );
 
-    burn_strokes(&pdf_path, &strokes, (0.8, 0.0, 0.0), 2.0).unwrap();
+    save_strokes(&pdf_path, &strokes, (0.8, 0.0, 0.0), 2.0).unwrap();
     println!("geschrieben: {}", pdf_path.display());
 }

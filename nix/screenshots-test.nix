@@ -133,6 +133,10 @@ testers.runNixOSTest {
         };
       };
 
+      # Ghostscript strips the saved ink annotations in the round-trip
+      # check below.
+      environment.systemPackages = [ pkgs.ghostscript ];
+
       fonts.packages = [ pkgs.dejavu_fonts ];
       # Headroom for GTK4 plus the parallel thumbnail workers; the
       # 1 GiB default is tight for that.
@@ -270,7 +274,11 @@ testers.runNixOSTest {
         # annotation).
         machine.wait_for_text("(?i)johannes")
 
+    score = "/home/alice/scores/brahms-symphony-1-trombone-3-bass.pdf"
+
     with subtest("freehand annotation: 'Choral' above letter C"):
+        # Keep the untouched file for the strip round-trip check below.
+        machine.succeed(f"cp {score} /tmp/orig.pdf")
         machine.send_key("a")  # pen mode (mouse strokes draw)
 
         # Simple polyline letters in a 24 px box: (strokes, advance).
@@ -308,9 +316,26 @@ testers.runNixOSTest {
         retry(ink_visible)
         park_cursor()
         machine.screenshot("annotation")
-        # Leaving pen mode burns the strokes into the (writable) PDF;
-        # later screenshots show the annotation persisted.
+        # Leaving pen mode saves the strokes into the (writable) PDF as
+        # ink annotations; later screenshots show them persisted.
         machine.send_key("a")
+
+    with subtest("stripping the ink annotations restores the original"):
+        # The save rewrote the file...
+        machine.wait_until_succeeds(f"! cmp -s {score} /tmp/orig.pdf")
+        # ...but only with annotation objects: normalizing both files
+        # through Ghostscript (deterministic thanks to the Omit* flags)
+        # while dropping annotations must yield byte-identical PDFs —
+        # proof that the page content itself is untouched and any PDF
+        # tool can remove the strokes again.
+        strip = (
+            "gs -o {out} -sDEVICE=pdfwrite -dPreserveAnnots=false"
+            " -dShowAnnots=false -dOmitInfoDate=true -dOmitID=true"
+            " -dOmitXMP=true {src}"
+        )
+        machine.succeed(strip.format(out="/tmp/norm-orig.pdf", src="/tmp/orig.pdf"))
+        machine.succeed(strip.format(out="/tmp/norm-annotated.pdf", src=score))
+        machine.succeed("cmp /tmp/norm-orig.pdf /tmp/norm-annotated.pdf")
 
     with subtest("the tuner reads a green 443 Hz from the loopback mic"):
         machine.systemctl("start sine-source")

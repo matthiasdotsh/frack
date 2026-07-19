@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Freehand strokes are now saved as standard PDF ink annotations
+  (ISO 32000) instead of being drawn into the page content stream. The
+  page content stays untouched, so individual strokes can be deleted or
+  edited afterwards with any standard PDF tool (e.g. Okular), or all of
+  them stripped with Ghostscript (see README). An embedded appearance
+  stream preserves the pressure-dependent line widths in other viewers.
+
 ## [0.2.0] - 2026-07-18
 
 ### Added

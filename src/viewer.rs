@@ -3,13 +3,13 @@
 
 //! Displays a PDF with half-page turns (the next page's top half appears
 //! first) and freehand stylus annotations. Annotations are kept in memory
-//! until the page is turned or the document is closed, then burned into
-//! the file (see burn.rs).
+//! until the page is turned or the document is closed, then saved into
+//! the file as PDF ink annotations (see annot.rs).
 //!
 //! Rendered pages are cached as bitmaps and neighboring pages are
 //! pre-rendered while idle – turning a page only copies pixels.
 
-use crate::burn::{self, Stroke, StrokePoint};
+use crate::annot::{self, Stroke, StrokePoint};
 use crate::config::Config;
 use gtk::cairo;
 use gtk::glib;
@@ -101,7 +101,7 @@ pub struct DocState {
     pub n_pages: usize,
     pub pos: ViewPos,
     pub annotate: bool,
-    /// Strokes not yet burned in, per 0-based page index.
+    /// Strokes not yet saved, per 0-based page index.
     pub pending: BTreeMap<usize, Vec<Stroke>>,
     /// The stroke currently being drawn.
     pub current: Option<Stroke>,
@@ -525,7 +525,7 @@ impl Viewer {
         self.area.queue_draw();
     }
 
-    /// Burns all pending strokes into the file and reloads it.
+    /// Saves all pending strokes into the file and reloads it.
     pub fn flush(&self) {
         let mut guard = self.state.borrow_mut();
         let Some(st) = guard.as_mut() else { return };
@@ -536,7 +536,7 @@ impl Viewer {
             st.pending.clear();
             return;
         }
-        match burn::burn_strokes(&st.path, &st.pending, self.cfg.pen_rgb(), self.cfg.pen_width) {
+        match annot::save_strokes(&st.path, &st.pending, self.cfg.pen_rgb(), self.cfg.pen_width) {
             Ok(()) => {
                 // Drop cache entries for the modified pages; the rest stays
                 // valid. The thumbnail worker holds a now-stale document,
@@ -602,7 +602,7 @@ impl Viewer {
         self.area.queue_draw();
     }
 
-    /// Removes the last stroke (not yet burned in) on the current page.
+    /// Removes the last stroke (not yet saved) on the current page.
     pub fn undo(&self) {
         let mut guard = self.state.borrow_mut();
         let Some(st) = guard.as_mut() else { return };
@@ -1315,7 +1315,7 @@ fn draw_half_page(
     cr.restore().ok();
 }
 
-/// Draws the not-yet-burned strokes of a page; the cairo coordinate
+/// Draws the not-yet-saved strokes of a page; the cairo coordinate
 /// system must already be the page's.
 fn draw_strokes(
     cr: &cairo::Context,
@@ -1340,7 +1340,7 @@ fn draw_strokes(
             0 => {}
             1 => {
                 let p = &stroke.points[0];
-                let w = burn::width_for(cfg.pen_width, p.pressure);
+                let w = annot::width_for(cfg.pen_width, p.pressure);
                 cr.set_line_width(w);
                 cr.move_to(p.x, p.y);
                 cr.line_to(p.x, p.y);
@@ -1348,7 +1348,7 @@ fn draw_strokes(
             }
             _ => {
                 for pair in stroke.points.windows(2) {
-                    let w = burn::width_for(
+                    let w = annot::width_for(
                         cfg.pen_width,
                         (pair[0].pressure + pair[1].pressure) / 2.0,
                     );

@@ -403,7 +403,7 @@ fn build_ui(app: &gtk::Application, root_override: Option<PathBuf>) {
         window.add_controller(keys);
     }
 
-    // Burn pending annotations into the file on close.
+    // Save pending annotations into the file on close.
     {
         let viewer = viewer.clone();
         window.connect_close_request(move |_| {
