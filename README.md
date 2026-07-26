@@ -125,6 +125,8 @@ including licenses.
 ```toml
 root_dir = "/home/ms/Noten"   # searched recursively for *.pdf; a directory
                               # passed on the command line takes precedence
+setlists_dir = "/home/ms/Noten/setlists"  # ordered programmes (see Setlists);
+                                          # defaults to root_dir/setlists
 pen_width = 1.5
 pen_color = "#cc0000"
 a4 = 443.0                    # tuner reference pitch in Hz
@@ -203,13 +205,76 @@ gs -o clean.pdf -sDEVICE=pdfwrite -dPreserveAnnots=false -dShowAnnots=false in.p
 (Note that Ghostscript rewrites the whole file and drops *all*
 annotation types, including hyperlinks.)
 
+## Setlists
+
+*Planned — documented here for review; not yet implemented.*
+
+A setlist is an ordered programme for a rehearsal or concert: a list of
+pieces you turn through as one, so a foot-pedal page turn at the end of one
+part carries straight on to the top of the next. It doubles as a record of
+what you played when, and as a bookmark list for the pieces you practise
+often.
+
+True to "your files stay yours", a setlist is not a hidden database entry
+but a plain text file you can write in any editor — one score per line, in
+order:
+
+```
+# Autumn concert — 2025-11-14
+Wagner/Ride of the Valkyries.pdf
+Beethoven/Symphony 5/Trombone 3.pdf
+Dvořák/Symphony 9/Trombone 3.pdf
+# Encore
+Strauss/Radetzky March.pdf
+```
+
+- **Paths are relative to `root_dir`** and are played top to bottom.
+- **`#` starts a comment** — a title, or a section such as *Encore*; blank
+  lines are ignored, so you can group entries visually.
+- **Page ranges** pin an entry to part of a PDF using `#page=`, the same
+  fragment a browser or PDF viewer uses to open a file at a page — useful
+  when one file holds several parts and you only need yours, so there is no
+  more cutting PDFs apart:
+  - `Combined/Trombones.pdf#page=5-6` — only pages 5–6
+  - `Etudes/Arban.pdf#page=12-` — page 12 to the end
+  - `Overture.pdf#page=-4` — the start through page 4
+  - `Bruckner/Symphony 7.pdf#page=3` — just page 3
+
+  Page numbers are 1-based and inclusive.
+
+Setlists live in `setlists_dir` (`root_dir/setlists` by default, see
+[Configuration](#configuration)) and appear in their own section at the top
+of the library, most recent first, with older ones a search away — a past
+programme never clutters the view but stays findable. Naming a file
+`2025-11-14-autumn-concert.txt` keeps that order stable even when a sync
+tool rewrites timestamps. The file name, without `.txt`, is what you see.
+
+**Turning through a setlist.** Open one and you page across its pieces as
+though they were a single score; the header shows your place (`2/7 · Ride
+of the Valkyries`). The back button steps out to the setlist's own list of
+pieces — tap any one to jump straight to it, so when a rehearsal skips
+ahead or repeats a number you are there at once; a second back returns to
+the library. The foot pedal always turns through in order — jumping is a
+tap, for the rehearsal room.
+
+**When something is missing.** If a file a setlist names is not there — a
+typo, a moved score, or one your sync has not brought over yet — frack
+warns you up front: opening the setlist shows which entries are missing,
+well before you are on stage. Turn onto a missing entry while playing and you get a
+placeholder page naming the file, not a crash and not a silent skip, and
+you can page right past it.
+
 ## Roadmap
 
 Ideas I plan to add, not yet implemented:
 
-- **Setlists** — ordered programmes for a rehearsal or concert, likely
-  built from symlinks so they stay plain files that fit the "your files
-  stay yours" model.
+- **Building setlists in the app** — reordering, appending the current
+  piece or an encore, and adding to a favourites list without dropping to a
+  text editor; for now setlists are maintained as plain files (see
+  [Setlists](#setlists)).
+- **"Where have we played this?"** — with a piece open, list the setlists
+  it appears in, by date, from the middle-tap overlay: the same history
+  seen from the other side.
 - **Quickly receiving scores from others** (feasibility unclear) — a
   workflow to get a colleague's part on the spot, e.g. something
   AirDrop-like.
