@@ -5,7 +5,8 @@
 A penguin in tails for your music stand: **frack** is a sheet music
 viewer for Linux (GTK4/Rust). Half-page turns (the next page's top half
 appears first), foot pedal support (Page Up/Down), freehand annotations
-with a stylus – saved into the PDF file as standard ink annotations. No
+with a stylus or finger – saved into the PDF file as standard ink
+annotations, with unlimited undo/redo. No
 database: the library is just a directory, and sync and versioning are
 left to external tools (git-annex, Syncthing).
 
@@ -152,17 +153,48 @@ documented in that folder's README.
 
 ## Keys & touch
 
-Page Up/Down turns half pages, `a` = pen mode, Ctrl+Z = undo stroke,
-`t` = tuner bar (pitch history over time),
-F11 = fullscreen, Esc = back. Tapping the left/right screen edge turns
-pages; tapping the middle opens an overlay with a page slider (fast
-jumps in long PDFs) and touch buttons for back, pen, undo, tuner and
-fullscreen – everything works without a keyboard. Pinch with two fingers to zoom in (e.g.
-for precise annotations) and pan; pinch out to return to the fitted
-view – page turns also reset the zoom. Annotations are saved on page
-turn and on exit – as standard PDF ink annotations, so any PDF editor
-(e.g. Okular) can delete or move individual strokes afterwards. To strip
-them all from the command line:
+**Drawing.** The stylus always draws — there is no mode to switch on
+first. To annotate with your finger instead, turn on pen mode (the pen
+button, or `a`); two fingers keep zooming in either case. While the
+stylus is drawing, resting-palm touches are ignored. On the half-page
+(split) view, the first stylus contact switches to the full page it
+touched, so there is always a whole page to draw on.
+
+**Erasing.** The stylus' eraser end erases; for finger or mouse, turn on
+the eraser button (or `e`). It rubs out the parts of a stroke it passes
+over (splitting the stroke, leaving the rest) rather than deleting the
+whole thing — a circle shows the erase area. The remaining pieces stay
+ordinary ink annotations, and erasing is fully undoable. Pen and eraser
+modes are mutually exclusive.
+
+The pen's eraser end works wherever the driver reports it as an eraser
+tool (which end is touching is read as the tool comes into range, so
+flipping the pen switches between drawing and erasing). If your stylus
+has no separate eraser, the eraser button does the same job.
+
+**Undo/redo.** Undo (Ctrl+Z, or the button) is unlimited and works even
+on strokes saved earlier — including from a previous session, because the
+strokes live in the file itself. Redo (Ctrl+Shift+Z or Ctrl+Y) brings
+back what you took back, within the current session; drawing a new stroke
+clears the redo history.
+
+**Saving.** Strokes are written back on page turns, on exit, and
+automatically a few seconds after you lift the pen — so even a single-page
+score, or an unexpected shutdown, keeps its annotations. They are stored
+as standard PDF ink annotations (ISO 32000), each with its own colour and
+width, so any PDF editor (e.g. Okular) can move or delete individual
+strokes afterwards.
+
+**Navigation.** Page Up/Down turns half pages (a foot pedal sends the
+same keys), `t` = tuner bar (pitch history over time), F11 = fullscreen,
+Esc = back. Tapping the left/right screen edge turns pages; tapping the
+middle opens an overlay with a page slider (fast jumps in long PDFs) and
+touch buttons for back, pen, eraser, undo, redo, tuner and fullscreen —
+everything works without a keyboard. Pinch with two fingers to zoom in (e.g. for
+precise annotations) and pan; pinch out to return to the fitted view —
+page turns also reset the zoom.
+
+To strip all annotations from the command line:
 
 ```sh
 gs -o clean.pdf -sDEVICE=pdfwrite -dPreserveAnnots=false -dShowAnnots=false in.pdf
@@ -178,9 +210,6 @@ Ideas I plan to add, not yet implemented:
 - **Setlists** — ordered programmes for a rehearsal or concert, likely
   built from symlinks so they stay plain files that fit the "your files
   stay yours" model.
-- **Removing annotations in frack** — strokes are standard ink
-  annotations, so any PDF editor can already delete them; what is
-  missing is an eraser tool inside frack itself.
 - **Quickly receiving scores from others** (feasibility unclear) — a
   workflow to get a colleague's part on the spot, e.g. something
   AirDrop-like.

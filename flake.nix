@@ -1,5 +1,5 @@
 {
-  description = "Sheet music viewer for Linux: half-page turns, stylus annotations burned into the PDF, tuner with pitch history";
+  description = "Sheet music viewer for Linux";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";

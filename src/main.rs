@@ -66,9 +66,16 @@ fn build_ui(app: &gtk::Application, root_override: Option<PathBuf>) {
     pen.set_icon_name("document-edit-symbolic");
     pen.set_tooltip_text(Some("Anmerkungsmodus (a)"));
     pen.set_visible(false);
+    let erase = gtk::ToggleButton::new();
+    erase.set_icon_name("error-correct-symbolic");
+    erase.set_tooltip_text(Some("Radiergummi (e)"));
+    erase.set_visible(false);
     let undo = gtk::Button::from_icon_name("edit-undo-symbolic");
     undo.set_tooltip_text(Some("Strich zurücknehmen (Strg+Z)"));
     undo.set_visible(false);
+    let redo = gtk::Button::from_icon_name("edit-redo-symbolic");
+    redo.set_tooltip_text(Some("Strich wiederherstellen (Strg+Umschalt+Z)"));
+    redo.set_visible(false);
     let tuner_btn = gtk::ToggleButton::new();
     tuner_btn.set_icon_name("audio-input-microphone-symbolic");
     tuner_btn.set_tooltip_text(Some("Stimmgerät (t)"));
@@ -83,7 +90,9 @@ fn build_ui(app: &gtk::Application, root_override: Option<PathBuf>) {
     header.pack_start(&tuner_btn);
     header.pack_end(&header_fullscreen);
     header.pack_end(&pen);
+    header.pack_end(&erase);
     header.pack_end(&undo);
+    header.pack_end(&redo);
     header.set_title_widget(Some(&status));
     window.set_titlebar(Some(&header));
 
@@ -129,7 +138,9 @@ fn build_ui(app: &gtk::Application, root_override: Option<PathBuf>) {
     }
 
     // ----- Viewer -----
-    let viewer = viewer::Viewer::new(cfg.clone(), status.clone(), pen.clone());
+    let viewer = viewer::Viewer::new(cfg.clone(), status.clone(), pen.clone(), erase.clone());
+    viewer.register_undo_button(&undo);
+    viewer.register_redo_button(&redo);
 
     let stack = gtk::Stack::new();
     stack.add_named(&libbox, Some("library"));
@@ -235,7 +246,9 @@ fn build_ui(app: &gtk::Application, root_override: Option<PathBuf>) {
         let back = back.clone();
         let refresh = refresh.clone();
         let pen = pen.clone();
+        let erase = erase.clone();
         let undo = undo.clone();
+        let redo = redo.clone();
         let status = status.clone();
         let search = search.clone();
         Rc::new(move || {
@@ -243,7 +256,9 @@ fn build_ui(app: &gtk::Application, root_override: Option<PathBuf>) {
             stack.set_visible_child_name("library");
             back.set_visible(false);
             pen.set_visible(false);
+            erase.set_visible(false);
             undo.set_visible(false);
+            redo.set_visible(false);
             refresh.set_visible(true);
             status.set_text("Bibliothek");
             search.grab_focus();
@@ -257,7 +272,9 @@ fn build_ui(app: &gtk::Application, root_override: Option<PathBuf>) {
         let back = back.clone();
         let refresh = refresh.clone();
         let pen = pen.clone();
+        let erase = erase.clone();
         let undo = undo.clone();
+        let redo = redo.clone();
         let info = info.clone();
         list.connect_row_activated(move |_, row| {
             let path = match entries.borrow().get(row.index() as usize) {
@@ -269,7 +286,9 @@ fn build_ui(app: &gtk::Application, root_override: Option<PathBuf>) {
                     stack.set_visible_child_name("viewer");
                     back.set_visible(true);
                     pen.set_visible(true);
+                    erase.set_visible(true);
                     undo.set_visible(true);
+                    redo.set_visible(true);
                     refresh.set_visible(false);
                 }
                 Err(e) => {
@@ -288,6 +307,10 @@ fn build_ui(app: &gtk::Application, root_override: Option<PathBuf>) {
         let viewer = viewer.clone();
         undo.connect_clicked(move |_| viewer.undo());
     }
+    {
+        let viewer = viewer.clone();
+        redo.connect_clicked(move |_| viewer.redo());
+    }
 
     // ----- Touch actions in the navigation overlay (middle tap) -----
     // Mirrors of the header actions, reachable without a keyboard even
@@ -303,8 +326,20 @@ fn build_ui(app: &gtk::Application, root_override: Option<PathBuf>) {
             .bidirectional()
             .sync_create()
             .build();
+        let erase2 = gtk::ToggleButton::new();
+        erase2.set_icon_name("error-correct-symbolic");
+        erase2.set_tooltip_text(Some("Radiergummi"));
+        erase
+            .bind_property("active", &erase2, "active")
+            .bidirectional()
+            .sync_create()
+            .build();
         let undo2 = gtk::Button::from_icon_name("edit-undo-symbolic");
         undo2.set_tooltip_text(Some("Strich zurücknehmen"));
+        viewer.register_undo_button(&undo2);
+        let redo2 = gtk::Button::from_icon_name("edit-redo-symbolic");
+        redo2.set_tooltip_text(Some("Strich wiederherstellen"));
+        viewer.register_redo_button(&redo2);
         let tuner2 = gtk::ToggleButton::new();
         tuner2.set_icon_name("audio-input-microphone-symbolic");
         tuner2.set_tooltip_text(Some("Stimmgerät"));
@@ -319,7 +354,9 @@ fn build_ui(app: &gtk::Application, root_override: Option<PathBuf>) {
         spacer.set_hexpand(true);
         actions.append(&back2);
         actions.append(&pen2);
+        actions.append(&erase2);
         actions.append(&undo2);
+        actions.append(&redo2);
         actions.append(&tuner2);
         actions.append(&spacer);
         actions.append(&fullscreen);
@@ -331,6 +368,10 @@ fn build_ui(app: &gtk::Application, root_override: Option<PathBuf>) {
         {
             let viewer = viewer.clone();
             undo2.connect_clicked(move |_| viewer.undo());
+        }
+        {
+            let viewer = viewer.clone();
+            redo2.connect_clicked(move |_| viewer.redo());
         }
         {
             let window = window.clone();
@@ -351,6 +392,7 @@ fn build_ui(app: &gtk::Application, root_override: Option<PathBuf>) {
         let window2 = window.clone();
         let show_library = show_library.clone();
         let pen = pen.clone();
+        let erase = erase.clone();
         let keys = gtk::EventControllerKey::new();
         keys.connect_key_pressed(move |_, key, _code, modifier| {
             use gtk::gdk::Key;
@@ -393,8 +435,20 @@ fn build_ui(app: &gtk::Application, root_override: Option<PathBuf>) {
                     pen.set_active(!pen.is_active());
                     glib::Propagation::Stop
                 }
+                Key::e => {
+                    erase.set_active(!erase.is_active());
+                    glib::Propagation::Stop
+                }
                 Key::z if modifier.contains(gtk::gdk::ModifierType::CONTROL_MASK) => {
-                    viewer.undo();
+                    if modifier.contains(gtk::gdk::ModifierType::SHIFT_MASK) {
+                        viewer.redo();
+                    } else {
+                        viewer.undo();
+                    }
+                    glib::Propagation::Stop
+                }
+                Key::y if modifier.contains(gtk::gdk::ModifierType::CONTROL_MASK) => {
+                    viewer.redo();
                     glib::Propagation::Stop
                 }
                 _ => glib::Propagation::Proceed,

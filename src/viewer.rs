@@ -2,14 +2,25 @@
 // SPDX-FileCopyrightText: 2026 matthias
 
 //! Displays a PDF with half-page turns (the next page's top half appears
-//! first) and freehand stylus annotations. Annotations are kept in memory
-//! until the page is turned or the document is closed, then saved into
-//! the file as PDF ink annotations (see annot.rs).
+//! first) and freehand annotations.
+//!
+//! Annotations are standard PDF ink annotations (see annot.rs). While a
+//! document is open, all of its strokes live in memory as the single
+//! source of truth: on open they are read out of the file and removed from
+//! the copy Poppler renders, so frack draws them itself as an overlay it
+//! fully controls. This makes undo unlimited (and effective across
+//! sessions, since the strokes are in the file) and redo possible within a
+//! session. Strokes are written back on page turns, on close, and by a
+//! debounced autosave a few seconds after the pen is lifted – so even a
+//! single-page document, or an unexpected shutdown, keeps its annotations.
+//!
+//! Input: the stylus always draws (no mode needed); the pen button turns
+//! finger drawing on. Two fingers zoom in either mode. See [`Viewer::setup_gestures`].
 //!
 //! Rendered pages are cached as bitmaps and neighboring pages are
 //! pre-rendered while idle – turning a page only copies pixels.
 
-use crate::annot::{self, Stroke, StrokePoint};
+use crate::annot::{self, PageChange, Stroke, StrokePoint, StrokesByPage};
 use crate::config::Config;
 use gtk::cairo;
 use gtk::glib;
@@ -20,6 +31,11 @@ use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+/// Delay between the last stroke and an automatic save. Debounced: every
+/// new stroke pushes it back, so the save lands in a pause, never mid-write.
+const AUTOSAVE_DELAY: Duration = Duration::from_secs(10);
 
 /// Display position. `Split(n)` shows the top half of page n+1 above the
 /// bottom half of page n – you finish playing page n while the beginning
@@ -89,6 +105,47 @@ struct ThumbWorker {
 
 const MAX_ZOOM: f64 = 6.0;
 
+/// Eraser radius in page points: a stroke is erased when the eraser comes
+/// this close to it (plus the stroke's own half width).
+const ERASER_RADIUS: f64 = 10.0;
+
+/// One reversible edit on a page's stroke list, for undo/redo. Positions
+/// are indices into the page's `strokes` vector at the time of the edit;
+/// because undo/redo happen strictly in reverse order, the list always
+/// matches the state an edit was recorded in, so the indices stay valid.
+enum Edit {
+    /// A stroke was added at this index (drawing, or a redone erase-undo).
+    Added(usize, Stroke),
+    /// One or more strokes were partly erased: each was replaced in place by
+    /// its remaining pieces. Recorded in application order; undo reverses
+    /// them in reverse order (so indices stay valid).
+    Trimmed(Vec<TrimOp>),
+}
+
+/// One stroke replaced in place by the pieces the eraser left of it (empty
+/// if it was erased entirely).
+struct TrimOp {
+    index: usize,
+    original: Stroke,
+    pieces: Vec<Stroke>,
+}
+
+/// The erase gesture in progress: which page, the trims done so far (to
+/// become one undo step), and the eraser's widget position (for the cursor
+/// circle).
+struct ErasePass {
+    page: usize,
+    ops: Vec<TrimOp>,
+    cursor: (f64, f64),
+}
+
+/// What a pointer contact does.
+enum Action {
+    Draw,
+    Erase,
+    Ignore,
+}
+
 /// Render height of slider preview thumbnails (pixels).
 const THUMB_H: f64 = 240.0;
 /// Content size of the preview tile above the slider.
@@ -100,11 +157,35 @@ pub struct DocState {
     pub doc: poppler::Document,
     pub n_pages: usize,
     pub pos: ViewPos,
+    /// Whether finger drawing is on (the pen button). The stylus draws
+    /// regardless; this only affects touch and mouse input.
     pub annotate: bool,
-    /// Strokes not yet saved, per 0-based page index.
-    pub pending: BTreeMap<usize, Vec<Stroke>>,
+    /// Whether finger erasing is on (the eraser button). The stylus' eraser
+    /// end erases regardless; this only affects touch and mouse input.
+    pub erase: bool,
+    /// All strokes of the document, per 0-based page index – the source of
+    /// truth while it is open. Drawn as an overlay; the same strokes are
+    /// removed from the Poppler render on load, so nothing appears twice.
+    pub strokes: BTreeMap<usize, Vec<Stroke>>,
+    /// How many of a page's strokes are already written to the file (the
+    /// front of the list). Anything beyond is appended on the next save.
+    saved: BTreeMap<usize, usize>,
+    /// Pages where a stroke was removed and which therefore need to be
+    /// rewritten from scratch (rather than appended to) on the next save.
+    rewrite: HashSet<usize>,
+    /// Per-page undo stack of edits, newest last. Seeded on open with an
+    /// `Added` per existing stroke, so undo reaches strokes saved earlier
+    /// (even in a previous session).
+    undo: BTreeMap<usize, Vec<Edit>>,
+    /// Per-page redo stack. In memory only – redo does not survive closing.
+    redo: BTreeMap<usize, Vec<Edit>>,
     /// The stroke currently being drawn.
     pub current: Option<Stroke>,
+    /// The erase gesture in progress, if any.
+    erasing: Option<ErasePass>,
+    /// True while a stylus stroke (draw or erase) is in progress, so
+    /// resting-palm touches are ignored (palm rejection).
+    stylus_active: bool,
     cache: BTreeMap<usize, CachedPage>,
     /// Small page renders for the slider preview, cached per page.
     thumbs: BTreeMap<usize, cairo::ImageSurface>,
@@ -122,6 +203,7 @@ pub struct Viewer {
     cfg: Rc<Config>,
     status: gtk::Label,
     pen_button: gtk::ToggleButton,
+    erase_button: gtk::ToggleButton,
     /// Some(...) while a pinch gesture is in progress.
     pinch: Rc<RefCell<Option<PinchStart>>>,
     /// True while a crisp zoom render is already scheduled.
@@ -143,10 +225,27 @@ pub struct Viewer {
     preview_page: Rc<std::cell::Cell<usize>>,
     /// Background thumbnail renderer, running while thumbs are missing.
     thumb_worker: Rc<RefCell<Option<ThumbWorker>>>,
+    /// Undo/redo buttons (header + overlay mirrors) whose sensitivity
+    /// tracks the current page's history. Registered by main.
+    undo_buttons: Rc<RefCell<Vec<gtk::Button>>>,
+    redo_buttons: Rc<RefCell<Vec<gtk::Button>>>,
+    /// Pending debounced autosave, if armed.
+    autosave_timer: Rc<RefCell<Option<glib::SourceId>>>,
+    /// Whether the stylus tool in proximity is the eraser end. GTK4/Wayland
+    /// can apply a pen↔eraser tool change a beat late, so the button-down
+    /// event may still report the old tool; the proximity signal (which
+    /// fires as the tool nears the screen) updates this first. See
+    /// `setup_gestures`.
+    stylus_eraser: Rc<std::cell::Cell<bool>>,
 }
 
 impl Viewer {
-    pub fn new(cfg: Rc<Config>, status: gtk::Label, pen_button: gtk::ToggleButton) -> Self {
+    pub fn new(
+        cfg: Rc<Config>,
+        status: gtk::Label,
+        pen_button: gtk::ToggleButton,
+        erase_button: gtk::ToggleButton,
+    ) -> Self {
         let area = gtk::DrawingArea::new();
         area.set_hexpand(true);
         area.set_vexpand(true);
@@ -198,6 +297,7 @@ impl Viewer {
             cfg,
             status,
             pen_button,
+            erase_button,
             pinch: Rc::new(RefCell::new(None)),
             zoom_job: Rc::new(std::cell::Cell::new(false)),
             overlay,
@@ -212,10 +312,15 @@ impl Viewer {
             preview_label,
             preview_page: Rc::new(std::cell::Cell::new(0)),
             thumb_worker: Rc::new(RefCell::new(None)),
+            undo_buttons: Rc::new(RefCell::new(Vec::new())),
+            redo_buttons: Rc::new(RefCell::new(Vec::new())),
+            autosave_timer: Rc::new(RefCell::new(None)),
+            stylus_eraser: Rc::new(std::cell::Cell::new(false)),
         };
         viewer.setup_draw();
         viewer.setup_gestures();
         viewer.setup_pen_button();
+        viewer.setup_erase_button();
         viewer.setup_nav();
         viewer.setup_preview();
         viewer
@@ -235,19 +340,40 @@ impl Viewer {
     pub fn open(&self, path: &Path) -> Result<(), String> {
         self.close();
         let abs = std::fs::canonicalize(path).map_err(|e| e.to_string())?;
-        let doc = load_document(&abs)?;
+        let (doc, strokes) = load_document(&abs)?;
         let n_pages = doc.n_pages().max(0) as usize;
         if n_pages == 0 {
             return Err("PDF has no pages".to_string());
         }
+        // Everything read from the file is already persisted.
+        let saved = strokes.iter().map(|(&p, v)| (p, v.len())).collect();
+        // Seed the undo history so already-saved strokes are undoable too.
+        let undo = strokes
+            .iter()
+            .map(|(&p, v)| {
+                let edits = v
+                    .iter()
+                    .enumerate()
+                    .map(|(i, s)| Edit::Added(i, s.clone()))
+                    .collect();
+                (p, edits)
+            })
+            .collect();
         *self.state.borrow_mut() = Some(DocState {
             path: abs,
             doc,
             n_pages,
             pos: ViewPos::Full(0),
             annotate: false,
-            pending: BTreeMap::new(),
+            erase: false,
+            strokes,
+            saved,
+            rewrite: HashSet::new(),
+            undo,
+            redo: BTreeMap::new(),
             current: None,
+            erasing: None,
+            stylus_active: false,
             cache: BTreeMap::new(),
             thumbs: BTreeMap::new(),
             zoom: 1.0,
@@ -255,17 +381,68 @@ impl Viewer {
             zoom_cache: None,
         });
         self.pen_button.set_active(false);
+        self.erase_button.set_active(false);
         self.nav_updating.set(true);
         self.nav_scale.set_range(1.0, n_pages.max(2) as f64);
         self.nav_scale.set_value(1.0);
         self.nav_updating.set(false);
         self.nav_box.set_visible(false);
         self.update_status();
+        self.update_history();
         self.area.queue_draw();
         // Generate slider previews in the background right away, so they
         // are ready by the time the slider is first used.
         self.start_thumbs();
         Ok(())
+    }
+
+    /// Registers a button whose sensitivity should follow whether the
+    /// current page has something to undo / redo.
+    pub fn register_undo_button(&self, b: &gtk::Button) {
+        self.undo_buttons.borrow_mut().push(b.clone());
+    }
+
+    pub fn register_redo_button(&self, b: &gtk::Button) {
+        self.redo_buttons.borrow_mut().push(b.clone());
+    }
+
+    /// Enables/disables the undo and redo buttons for the current page.
+    fn update_history(&self) {
+        let (can_undo, can_redo) = match self.state.borrow().as_ref() {
+            Some(st) => {
+                let page = st.pos.base_page();
+                let undo = st.current.is_some()
+                    || st.undo.get(&page).is_some_and(|v| !v.is_empty());
+                let redo = st.redo.get(&page).is_some_and(|v| !v.is_empty());
+                (undo, redo)
+            }
+            None => (false, false),
+        };
+        for b in self.undo_buttons.borrow().iter() {
+            b.set_sensitive(can_undo);
+        }
+        for b in self.redo_buttons.borrow().iter() {
+            b.set_sensitive(can_redo);
+        }
+    }
+
+    /// (Re)arms the debounced autosave; called after each finished stroke.
+    fn arm_autosave(&self) {
+        if let Some(id) = self.autosave_timer.borrow_mut().take() {
+            id.remove();
+        }
+        let v = self.clone();
+        let id = glib::timeout_add_local_once(AUTOSAVE_DELAY, move || {
+            *v.autosave_timer.borrow_mut() = None;
+            v.flush();
+        });
+        *self.autosave_timer.borrow_mut() = Some(id);
+    }
+
+    fn cancel_autosave(&self) {
+        if let Some(id) = self.autosave_timer.borrow_mut().take() {
+            id.remove();
+        }
     }
 
     /// Jumps directly to a 0-based page (full-page view).
@@ -281,6 +458,7 @@ impl Viewer {
         reset_zoom(st);
         drop(guard);
         self.update_status();
+        self.update_history();
         self.area.queue_draw();
     }
 
@@ -516,47 +694,50 @@ impl Viewer {
         }
     }
 
-    /// Saves pending annotations and closes the document.
+    /// Saves annotations and closes the document.
     pub fn close(&self) {
         self.flush();
         self.stop_thumbs();
         *self.state.borrow_mut() = None;
         self.nav_box.set_visible(false);
+        self.update_history();
         self.area.queue_draw();
     }
 
-    /// Saves all pending strokes into the file and reloads it.
+    /// Writes strokes to the file: newly drawn ones are appended, pages
+    /// with a removed stroke are rewritten. The rendered document is *not*
+    /// reloaded – the in-memory strokes stay the source of truth, so
+    /// nothing flickers and there is no re-render cost.
     pub fn flush(&self) {
+        self.cancel_autosave();
         let mut guard = self.state.borrow_mut();
         let Some(st) = guard.as_mut() else { return };
+        // Commit an in-progress stroke (e.g. when a shortcut fires mid-draw).
         if let Some(cur) = st.current.take() {
-            st.pending.entry(st.pos.base_page()).or_default().push(cur);
+            let page = st.pos.base_page();
+            st.strokes.entry(page).or_default().push(cur);
+            st.redo.remove(&page);
         }
-        if st.pending.values().all(|v| v.is_empty()) {
-            st.pending.clear();
+
+        let mut changes: BTreeMap<usize, PageChange> = BTreeMap::new();
+        for (&page, v) in &st.strokes {
+            let saved = st.saved.get(&page).copied().unwrap_or(0);
+            if st.rewrite.contains(&page) {
+                changes.insert(page, PageChange::Rewrite(v.clone()));
+            } else if v.len() > saved {
+                changes.insert(page, PageChange::Append(v[saved..].to_vec()));
+            }
+        }
+        if changes.is_empty() {
             return;
         }
-        match annot::save_strokes(&st.path, &st.pending, self.cfg.pen_rgb(), self.cfg.pen_width) {
+        match annot::save_changes(&st.path, &changes) {
             Ok(()) => {
-                // Drop cache entries for the modified pages; the rest stays
-                // valid. The thumbnail worker holds a now-stale document,
-                // so stop it too; it restarts on the next slider use.
-                for page in st.pending.keys() {
-                    st.cache.remove(page);
-                    st.thumbs.remove(page);
+                for page in changes.keys() {
+                    let len = st.strokes.get(page).map(Vec::len).unwrap_or(0);
+                    st.saved.insert(*page, len);
                 }
-                self.stop_thumbs();
-                st.zoom_cache = None;
-                st.pending.clear();
-                match load_document(&st.path) {
-                    Ok(doc) => st.doc = doc,
-                    Err(e) => {
-                        drop(guard);
-                        self.status
-                            .set_text(&format!("Fehler beim Neuladen: {e}"));
-                        return;
-                    }
-                }
+                st.rewrite.clear();
             }
             Err(e) => {
                 drop(guard);
@@ -566,23 +747,25 @@ impl Viewer {
             }
         }
         drop(guard);
-        self.area.queue_draw();
+        self.update_history();
     }
 
     pub fn forward(&self) {
         self.flush();
         let mut guard = self.state.borrow_mut();
         let Some(st) = guard.as_mut() else { return };
+        let editing = st.annotate || st.erase;
         st.pos = match st.pos {
-            // In annotation mode turn whole pages (drawing needs the full page).
-            ViewPos::Full(n) if st.annotate && n + 1 < st.n_pages => ViewPos::Full(n + 1),
-            ViewPos::Full(n) if !st.annotate && n + 1 < st.n_pages => ViewPos::Split(n),
+            // While editing, turn whole pages (drawing/erasing needs one).
+            ViewPos::Full(n) if editing && n + 1 < st.n_pages => ViewPos::Full(n + 1),
+            ViewPos::Full(n) if !editing && n + 1 < st.n_pages => ViewPos::Split(n),
             ViewPos::Split(n) => ViewPos::Full(n + 1),
             other => other,
         };
         reset_zoom(st);
         drop(guard);
         self.update_status();
+        self.update_history();
         self.area.queue_draw();
     }
 
@@ -590,30 +773,100 @@ impl Viewer {
         self.flush();
         let mut guard = self.state.borrow_mut();
         let Some(st) = guard.as_mut() else { return };
+        let editing = st.annotate || st.erase;
         st.pos = match st.pos {
-            ViewPos::Full(n) if st.annotate && n > 0 => ViewPos::Full(n - 1),
-            ViewPos::Full(n) if !st.annotate && n > 0 => ViewPos::Split(n - 1),
+            ViewPos::Full(n) if editing && n > 0 => ViewPos::Full(n - 1),
+            ViewPos::Full(n) if !editing && n > 0 => ViewPos::Split(n - 1),
             ViewPos::Split(n) => ViewPos::Full(n),
             other => other,
         };
         reset_zoom(st);
         drop(guard);
         self.update_status();
+        self.update_history();
         self.area.queue_draw();
     }
 
-    /// Removes the last stroke (not yet saved) on the current page.
+    /// Undoes the last edit on the current page: cancels a stroke in
+    /// progress, otherwise reverses the last draw or erase. Works on strokes
+    /// saved earlier too (even from a previous session) – any change here
+    /// marks the page to be rewritten on the next save.
     pub fn undo(&self) {
         let mut guard = self.state.borrow_mut();
         let Some(st) = guard.as_mut() else { return };
-        if st.current.take().is_none() {
-            let page = st.pos.base_page();
-            if let Some(v) = st.pending.get_mut(&page) {
-                v.pop();
+        // A stroke still being drawn is dropped without touching history.
+        if st.current.take().is_some() {
+            drop(guard);
+            self.area.queue_draw();
+            self.update_history();
+            return;
+        }
+        let page = st.pos.base_page();
+        let Some(edit) = st.undo.get_mut(&page).and_then(Vec::pop) else {
+            drop(guard);
+            return;
+        };
+        let strokes = st.strokes.entry(page).or_default();
+        match &edit {
+            Edit::Added(i, _) => {
+                if *i < strokes.len() {
+                    strokes.remove(*i);
+                }
+            }
+            Edit::Trimmed(ops) => {
+                // Reverse each trim, newest first: drop the pieces, put the
+                // original back.
+                for op in ops.iter().rev() {
+                    let i = op.index.min(strokes.len());
+                    let end = (i + op.pieces.len()).min(strokes.len());
+                    strokes.drain(i..end);
+                    strokes.insert(i, op.original.clone());
+                }
             }
         }
+        st.redo.entry(page).or_default().push(edit);
+        st.rewrite.insert(page);
         drop(guard);
+        self.arm_autosave();
         self.area.queue_draw();
+        self.update_history();
+    }
+
+    /// Redoes the last undone edit on the current page (within this session).
+    pub fn redo(&self) {
+        let mut guard = self.state.borrow_mut();
+        let Some(st) = guard.as_mut() else { return };
+        let page = st.pos.base_page();
+        let Some(edit) = st.redo.get_mut(&page).and_then(Vec::pop) else {
+            drop(guard);
+            return;
+        };
+        let strokes = st.strokes.entry(page).or_default();
+        match &edit {
+            Edit::Added(i, s) => {
+                let i = (*i).min(strokes.len());
+                strokes.insert(i, s.clone());
+            }
+            Edit::Trimmed(ops) => {
+                // Replay each trim in order: drop the original, splice in the
+                // pieces.
+                for op in ops {
+                    let i = op.index.min(strokes.len());
+                    if i < strokes.len() {
+                        strokes.remove(i);
+                    }
+                    for (k, p) in op.pieces.iter().enumerate() {
+                        strokes.insert(i + k, p.clone());
+                    }
+                }
+            }
+        }
+        st.undo.entry(page).or_default().push(edit);
+        st.rewrite.insert(page);
+        drop(guard);
+        self.arm_autosave();
+        self.area.queue_draw();
+        self.update_history();
     }
 
     pub fn update_status(&self) {
@@ -640,6 +893,10 @@ impl Viewer {
         }
     }
 
+    /// The pen button enables *finger* drawing. The stylus draws whether it
+    /// is on or off; the button only decides whether touch and mouse draw
+    /// too. Enabling it switches to the full page (drawing needs it and the
+    /// split view's overlay would cover bottom-of-page strokes).
     fn setup_pen_button(&self) {
         let v = self.clone();
         self.pen_button.connect_toggled(move |btn| {
@@ -648,18 +905,47 @@ impl Viewer {
                 let mut guard = v.state.borrow_mut();
                 let Some(st) = guard.as_mut() else { return };
                 st.annotate = active;
-                // Show the full current page for drawing; the overlay
-                // would sit in the way of bottom-of-page strokes.
                 if active {
                     st.pos = ViewPos::Full(st.pos.base_page());
                     v.nav_box.set_visible(false);
                 }
             }
-            if !active {
-                // Leaving annotation mode saves.
+            // Draw and erase modes are mutually exclusive.
+            if active {
+                v.erase_button.set_active(false);
+            } else {
+                // Turning finger drawing off is a natural "done" signal –
+                // save now instead of waiting for the autosave.
                 v.flush();
             }
             v.update_status();
+            v.update_history();
+            v.area.queue_draw();
+        });
+    }
+
+    /// The eraser button enables finger/mouse erasing. The stylus' eraser
+    /// end erases regardless. Mutually exclusive with the pen button.
+    fn setup_erase_button(&self) {
+        let v = self.clone();
+        self.erase_button.connect_toggled(move |btn| {
+            let active = btn.is_active();
+            {
+                let mut guard = v.state.borrow_mut();
+                let Some(st) = guard.as_mut() else { return };
+                st.erase = active;
+                if active {
+                    st.pos = ViewPos::Full(st.pos.base_page());
+                    v.nav_box.set_visible(false);
+                }
+            }
+            if active {
+                v.pen_button.set_active(false);
+            } else {
+                v.flush();
+            }
+            v.update_status();
+            v.update_history();
             v.area.queue_draw();
         });
     }
@@ -682,19 +968,32 @@ impl Viewer {
                 let Some(st) = guard.as_mut() else { return };
                 match st.pos {
                     ViewPos::Full(n) => {
-                        draw_full_page(cr, st, &v.cfg, n, w, h, sf);
+                        draw_full_page(cr, st, n, w, h, sf);
                     }
                     ViewPos::Split(n) => {
                         // Top: upper half of the next page; bottom: lower half
                         // of the current page, separated by a line.
-                        draw_half_page(cr, st, &v.cfg, n + 1, w, 0.0, h / 2.0, sf);
-                        draw_half_page(cr, st, &v.cfg, n, w, h / 2.0, h, sf);
+                        draw_half_page(cr, st, n + 1, w, 0.0, h / 2.0, sf);
+                        draw_half_page(cr, st, n, w, h / 2.0, h, sf);
                         cr.set_source_rgb(0.4, 0.4, 0.4);
                         cr.set_line_width(2.0);
                         cr.move_to(0.0, h / 2.0);
                         cr.line_to(w, h / 2.0);
                         let _ = cr.stroke();
                     }
+                }
+                // Eraser cursor: a circle the size of the erase radius.
+                if let Some(pass) = st.erasing.as_ref()
+                    && let ViewPos::Full(n) = st.pos
+                    && let Some(page) = st.doc.page(n as i32)
+                {
+                    let (pw, ph) = page.size();
+                    let (scale, _, _) = view_transform(st, w, h, pw, ph);
+                    let (cx, cy) = pass.cursor;
+                    cr.set_source_rgba(0.3, 0.3, 0.3, 0.9);
+                    cr.set_line_width(1.5);
+                    cr.arc(cx, cy, ERASER_RADIUS * scale, 0.0, std::f64::consts::TAU);
+                    let _ = cr.stroke();
                 }
             }
             // Pre-render neighboring pages while idle so the next page
@@ -773,55 +1072,71 @@ impl Viewer {
         false
     }
 
-    // ----- Input (stylus, mouse, tap to turn) -----
+    // ----- Input (stylus, finger, mouse, tap to turn) -----
 
     fn setup_gestures(&self) {
-        // Stylus with pressure.
+        // Stylus with pressure. The pen always draws – no mode needed – and
+        // switches a split view to the full page it touched.
+        // The pen tip draws, the pen's eraser end erases – both regardless
+        // of the buttons, which only govern finger/mouse.
         let stylus = gtk::GestureStylus::new();
+        // Which end is touching (pen tip vs eraser) is carried by the device
+        // tool's type. GTK4/Wayland can apply a pen↔eraser tool change a beat
+        // late, so the down event may still report the previous tool; the
+        // proximity signal fires as the tool nears the screen and updates the
+        // flag first. Subscribing to it is also what makes GTK track the tool
+        // change at all. The down handler then trusts whichever of the two
+        // saw the eraser.
+        let er = self.stylus_eraser.clone();
+        stylus.connect_proximity(move |g, _, _| er.set(stylus_is_eraser(g)));
         let v = self.clone();
         stylus.connect_down(move |g, x, y| {
+            let eraser = stylus_is_eraser(g) || v.stylus_eraser.get();
             let p = g.axis(gtk::gdk::AxisUse::Pressure).unwrap_or(0.5);
-            v.stroke_begin(x, y, p);
+            v.pointer_down(x, y, p, true, eraser);
         });
         let v = self.clone();
         stylus.connect_motion(move |g, x, y| {
             let p = g.axis(gtk::gdk::AxisUse::Pressure).unwrap_or(0.5);
-            v.stroke_move(x, y, p);
+            v.pointer_move(x, y, p, true);
         });
         let v = self.clone();
         stylus.connect_up(move |_, x, y| {
-            v.stroke_end(x, y, 0.5);
+            v.pointer_up(x, y, 0.5, true);
         });
         self.area.add_controller(stylus);
 
-        // Mouse fallback (for the couch/testing). Touch is denied (palm
-        // rejection); the stylus is handled by the gesture above.
+        // Finger and mouse. They draw (pen button) or erase (eraser button);
+        // the pen is denied here (the stylus gesture handles it). A single
+        // finger acts; a second finger starts the zoom gesture below, which
+        // aborts the stray stroke. Resting-palm touches are rejected while
+        // the stylus is active.
         let drag = gtk::GestureDrag::new();
         drag.set_button(gtk::gdk::BUTTON_PRIMARY);
         let v = self.clone();
         drag.connect_drag_begin(move |g, x, y| {
-            if let Some(src) = event_source(g.upcast_ref::<gtk::EventController>()) {
-                use gtk::gdk::InputSource;
-                if matches!(
-                    src,
-                    InputSource::Touchscreen | InputSource::Pen | InputSource::TabletPad
-                ) {
-                    g.set_state(gtk::EventSequenceState::Denied);
-                    return;
-                }
+            use gtk::gdk::InputSource;
+            let src = event_source(g.upcast_ref::<gtk::EventController>());
+            // The stylus (pen tip and eraser end, both InputSource::Pen) is
+            // handled by the stylus gesture above; only finger/mouse act here.
+            if matches!(src, Some(InputSource::Pen) | Some(InputSource::TabletPad))
+                || !v.finger_active_allowed()
+            {
+                g.set_state(gtk::EventSequenceState::Denied);
+                return;
             }
-            v.stroke_begin(x, y, 0.5);
+            v.pointer_down(x, y, 0.5, false, false);
         });
         let v = self.clone();
         drag.connect_drag_update(move |g, dx, dy| {
             if let Some((sx, sy)) = g.start_point() {
-                v.stroke_move(sx + dx, sy + dy, 0.5);
+                v.pointer_move(sx + dx, sy + dy, 0.5, false);
             }
         });
         let v = self.clone();
         drag.connect_drag_end(move |g, dx, dy| {
             if let Some((sx, sy)) = g.start_point() {
-                v.stroke_end(sx + dx, sy + dy, 0.5);
+                v.pointer_up(sx + dx, sy + dy, 0.5, false);
             }
         });
         self.area.add_controller(drag);
@@ -834,8 +1149,16 @@ impl Viewer {
         zoom_g.connect_begin(move |g, _| {
             let w = v.area.width() as f64;
             let h = v.area.height() as f64;
-            let guard = v.state.borrow();
-            let Some(st) = guard.as_ref() else { return };
+            let mut guard = v.state.borrow_mut();
+            let Some(st) = guard.as_mut() else { return };
+            // Palm rejection: no zoom while the stylus draws.
+            if st.stylus_active {
+                return;
+            }
+            // A second finger turns a nascent one-finger stroke or erase
+            // into a zoom; drop it so nothing gets committed.
+            st.current = None;
+            st.erasing = None;
             let ViewPos::Full(n) = st.pos else { return };
             let Some(page) = st.doc.page(n as i32) else { return };
             let (pw, ph) = page.size();
@@ -903,23 +1226,27 @@ impl Viewer {
         let click = gtk::GestureClick::new();
         let v = self.clone();
         click.connect_released(move |g, _, x, _| {
-            let Some((annotating, zoomed)) = v
+            let src = event_source(g.upcast_ref::<gtk::EventController>());
+            let Some((editing, zoomed, stylus_active)) = v
                 .state
                 .borrow()
                 .as_ref()
-                .map(|st| (st.annotate, st.zoom > 1.0))
+                .map(|st| (st.annotate || st.erase, st.zoom > 1.0, st.stylus_active))
             else {
                 return;
             };
+            // Palm rejection: ignore touch taps while the stylus draws.
+            if stylus_active && src == Some(gtk::gdk::InputSource::Touchscreen) {
+                return;
+            }
             let w = v.area.width() as f64;
             if (w / 3.0..=w * 2.0 / 3.0).contains(&x) {
-                let src = event_source(g.upcast_ref::<gtk::EventController>());
-                if !annotating || src == Some(gtk::gdk::InputSource::Touchscreen) {
+                if !editing || src == Some(gtk::gdk::InputSource::Touchscreen) {
                     v.toggle_nav();
                 }
                 return;
             }
-            if annotating || zoomed {
+            if editing || zoomed {
                 return;
             }
             if x > w * 2.0 / 3.0 {
@@ -931,23 +1258,113 @@ impl Viewer {
         self.area.add_controller(click);
     }
 
-    fn stroke_begin(&self, x: f64, y: f64, pressure: f64) {
-        let mut guard = self.state.borrow_mut();
-        let Some(st) = guard.as_mut() else { return };
-        if !st.annotate {
-            return;
+    /// Whether a finger/mouse drag should act right now (draw or erase mode
+    /// on and no stylus stroke in progress).
+    fn finger_active_allowed(&self) -> bool {
+        self.state
+            .borrow()
+            .as_ref()
+            .map(|st| (st.annotate || st.erase) && !st.stylus_active)
+            .unwrap_or(false)
+    }
+
+    /// What a pointer contact does. The pen tip always draws and its eraser
+    /// end always erases; finger/mouse follow the buttons (and are rejected
+    /// as palm while the stylus is active).
+    fn action_for(&self, is_pen: bool, is_eraser: bool) -> Action {
+        let guard = self.state.borrow();
+        let Some(st) = guard.as_ref() else { return Action::Ignore };
+        if is_pen {
+            return if is_eraser { Action::Erase } else { Action::Draw };
         }
-        if let Some(pt) = self.widget_to_page(st, x, y, pressure) {
-            st.current = Some(Stroke { points: vec![pt] });
+        if st.stylus_active {
+            return Action::Ignore;
         }
-        drop(guard);
+        if st.erase {
+            Action::Erase
+        } else if st.annotate {
+            Action::Draw
+        } else {
+            Action::Ignore
+        }
+    }
+
+    fn pointer_down(&self, x: f64, y: f64, pressure: f64, is_pen: bool, is_eraser: bool) {
+        match self.action_for(is_pen, is_eraser) {
+            Action::Draw => self.stroke_begin(x, y, pressure, is_pen),
+            Action::Erase => self.erase_begin(x, y, is_pen),
+            Action::Ignore => {}
+        }
+    }
+
+    fn pointer_move(&self, x: f64, y: f64, pressure: f64, is_pen: bool) {
+        let erasing = self
+            .state
+            .borrow()
+            .as_ref()
+            .is_some_and(|st| st.erasing.is_some());
+        if erasing {
+            self.erase_move(x, y, is_pen);
+        } else {
+            self.stroke_move(x, y, pressure, is_pen);
+        }
+    }
+
+    fn pointer_up(&self, x: f64, y: f64, pressure: f64, is_pen: bool) {
+        let erasing = self
+            .state
+            .borrow()
+            .as_ref()
+            .is_some_and(|st| st.erasing.is_some());
+        if erasing {
+            self.erase_end(is_pen);
+        } else {
+            self.stroke_end(x, y, pressure, is_pen);
+        }
+    }
+
+    /// Starts a stroke. `is_pen` marks stylus input, which draws in any
+    /// mode; finger/mouse input has already been gated by the caller. On a
+    /// split view the contact picks the page half to switch to full.
+    fn stroke_begin(&self, x: f64, y: f64, pressure: f64, is_pen: bool) {
+        let mut switched = false;
+        {
+            let mut guard = self.state.borrow_mut();
+            let Some(st) = guard.as_mut() else { return };
+            if !is_pen && (!st.annotate || st.stylus_active) {
+                return;
+            }
+            if is_pen {
+                st.stylus_active = true;
+            }
+            if let ViewPos::Split(n) = st.pos {
+                let h = self.area.height() as f64;
+                st.pos = if y < h / 2.0 {
+                    ViewPos::Full(n + 1)
+                } else {
+                    ViewPos::Full(n)
+                };
+                reset_zoom(st);
+                switched = true;
+            }
+            if let Some(pt) = self.widget_to_page(st, x, y, pressure) {
+                st.current = Some(Stroke {
+                    points: vec![pt],
+                    color: self.cfg.pen_rgb(),
+                    width: self.cfg.pen_width,
+                });
+            }
+        }
+        if switched {
+            self.update_status();
+        }
         self.area.queue_draw();
     }
 
-    fn stroke_move(&self, x: f64, y: f64, pressure: f64) {
+    fn stroke_move(&self, x: f64, y: f64, pressure: f64, is_pen: bool) {
         let mut guard = self.state.borrow_mut();
         let Some(st) = guard.as_mut() else { return };
-        if !st.annotate || st.current.is_none() {
+        if st.current.is_none() || (!is_pen && st.stylus_active) {
             return;
         }
         if let (Some(pt), Some(cur)) = (
@@ -960,21 +1377,152 @@ impl Viewer {
         self.area.queue_draw();
     }
 
-    fn stroke_end(&self, x: f64, y: f64, pressure: f64) {
+    fn stroke_end(&self, x: f64, y: f64, pressure: f64, is_pen: bool) {
         let mut guard = self.state.borrow_mut();
         let Some(st) = guard.as_mut() else { return };
-        if let Some(mut cur) = st.current.take() {
-            if let Some(pt) = self.widget_to_page(st, x, y, pressure) {
-                cur.points.push(pt);
-            }
-            st.pending.entry(st.pos.base_page()).or_default().push(cur);
+        if is_pen {
+            st.stylus_active = false;
+        } else if st.stylus_active {
+            // A palm finger lifting while the stylus draws: not our stroke.
+            return;
         }
+        let Some(mut cur) = st.current.take() else {
+            drop(guard);
+            self.area.queue_draw();
+            return;
+        };
+        if let Some(pt) = self.widget_to_page(st, x, y, pressure) {
+            cur.points.push(pt);
+        }
+        let page = st.pos.base_page();
+        let record = cur.clone();
+        let v = st.strokes.entry(page).or_default();
+        let idx = v.len();
+        v.push(cur);
+        // Drawing appends at the end – record it and drop any redo history.
+        st.undo.entry(page).or_default().push(Edit::Added(idx, record));
+        st.redo.remove(&page);
         drop(guard);
+        self.arm_autosave();
+        self.update_history();
         self.area.queue_draw();
     }
 
-    /// Widget coordinates → page coordinates (only in Full mode, which
-    /// annotation mode enforces).
+    // ----- Erasing (partial: trims the strokes along the eraser path) -----
+
+    /// Begins an erase pass, switching a split view to the touched full page
+    /// (like drawing). `is_pen` marks the stylus' eraser end.
+    fn erase_begin(&self, x: f64, y: f64, is_pen: bool) {
+        {
+            let mut guard = self.state.borrow_mut();
+            let Some(st) = guard.as_mut() else { return };
+            if is_pen {
+                st.stylus_active = true;
+            }
+            if let ViewPos::Split(n) = st.pos {
+                let h = self.area.height() as f64;
+                st.pos = if y < h / 2.0 {
+                    ViewPos::Full(n + 1)
+                } else {
+                    ViewPos::Full(n)
+                };
+                reset_zoom(st);
+            }
+            st.erasing = Some(ErasePass {
+                page: st.pos.base_page(),
+                ops: Vec::new(),
+                cursor: (x, y),
+            });
+        }
+        self.update_status();
+        self.erase_hit(x, y);
+    }
+
+    fn erase_move(&self, x: f64, y: f64, is_pen: bool) {
+        {
+            let guard = self.state.borrow();
+            let Some(st) = guard.as_ref() else { return };
+            if st.erasing.is_none() || (!is_pen && st.stylus_active) {
+                return;
+            }
+        }
+        self.erase_hit(x, y);
+    }
+
+    /// Removes every stroke under the eraser at widget point (x, y).
+    fn erase_hit(&self, x: f64, y: f64) {
+        let mut guard = self.state.borrow_mut();
+        let Some(st) = guard.as_mut() else { return };
+        let Some(page) = st.erasing.as_ref().map(|p| p.page) else { return };
+        // Move the cursor even when the point is off-page.
+        let pt = self.widget_to_page(st, x, y, 0.5);
+        if let Some(p) = st.erasing.as_mut() {
+            p.cursor = (x, y);
+        }
+        let Some(pt) = pt else {
+            drop(guard);
+            self.area.queue_draw();
+            return;
+        };
+        // Trim from the highest index down, so splicing in a stroke's pieces
+        // never shifts an index still to be processed. Record each trim in
+        // that order; undo reverses the whole pass in reverse.
+        let mut ops = Vec::new();
+        if let Some(strokes) = st.strokes.get_mut(&page) {
+            let mut i = strokes.len();
+            while i > 0 {
+                i -= 1;
+                let Some(pieces) = trim_stroke(&strokes[i], pt.x, pt.y, ERASER_RADIUS) else {
+                    continue;
+                };
+                let original = strokes.remove(i);
+                for (k, piece) in pieces.iter().enumerate() {
+                    strokes.insert(i + k, piece.clone());
+                }
+                ops.push(TrimOp { index: i, original, pieces });
+            }
+        }
+        let hit = !ops.is_empty();
+        if let Some(p) = st.erasing.as_mut() {
+            p.ops.extend(ops);
+        }
+        drop(guard);
+        if hit {
+            self.area.queue_draw();
+        }
+    }
+
+    /// Finishes an erase pass, turning its trims into one undo step.
+    fn erase_end(&self, is_pen: bool) {
+        let mut guard = self.state.borrow_mut();
+        let Some(st) = guard.as_mut() else { return };
+        if is_pen {
+            st.stylus_active = false;
+        }
+        let Some(pass) = st.erasing.take() else {
+            drop(guard);
+            self.area.queue_draw();
+            return;
+        };
+        let erased = !pass.ops.is_empty();
+        if erased {
+            st.undo
+                .entry(pass.page)
+                .or_default()
+                .push(Edit::Trimmed(pass.ops));
+            st.redo.remove(&pass.page);
+            st.rewrite.insert(pass.page);
+        }
+        drop(guard);
+        if erased {
+            self.arm_autosave();
+            self.update_history();
+        }
+        self.area.queue_draw();
+    }
+
+    /// Widget coordinates → page coordinates. Only meaningful in Full mode,
+    /// which drawing switches to via [`stroke_begin`].
     fn widget_to_page(&self, st: &DocState, x: f64, y: f64, pressure: f64) -> Option<StrokePoint> {
         let ViewPos::Full(n) = st.pos else { return None };
         let page = st.doc.page(n as i32)?;
@@ -994,9 +1542,14 @@ impl Viewer {
     }
 }
 
-fn load_document(path: &Path) -> Result<poppler::Document, String> {
-    let uri = glib::filename_to_uri(path, None).map_err(|e| e.to_string())?;
-    poppler::Document::from_file(uri.as_str(), None).map_err(|e| e.to_string())
+/// Loads the document for rendering (Poppler) together with its strokes.
+/// The ink annotations are stripped from the copy Poppler sees – frack
+/// draws them itself – so they never render twice.
+fn load_document(path: &Path) -> Result<(poppler::Document, StrokesByPage), String> {
+    let (bytes, strokes) = annot::load_and_strip(path).map_err(|e| e.to_string())?;
+    let gbytes = glib::Bytes::from_owned(bytes);
+    let doc = poppler::Document::from_bytes(&gbytes, None).map_err(|e| e.to_string())?;
+    Ok((doc, strokes))
 }
 
 /// Scale and offset to fit a page (pw×ph) centered into the area (w×h).
@@ -1232,15 +1785,7 @@ fn blit_page(cr: &cairo::Context, cached: &CachedPage, ox: f64, oy: f64, sf: f64
     cr.restore().ok();
 }
 
-fn draw_full_page(
-    cr: &cairo::Context,
-    st: &mut DocState,
-    cfg: &Config,
-    n: usize,
-    w: f64,
-    h: f64,
-    sf: f64,
-) {
+fn draw_full_page(cr: &cairo::Context, st: &mut DocState, n: usize, w: f64, h: f64, sf: f64) {
     let Some(page) = st.doc.page(n as i32) else { return };
     let (pw, ph) = page.size();
     let (scale, ox, oy) = view_transform(st, w, h, pw, ph);
@@ -1274,7 +1819,7 @@ fn draw_full_page(
     cr.save().ok();
     cr.translate(ox, oy);
     cr.scale(scale, scale);
-    draw_strokes(cr, st, cfg, n, true);
+    draw_strokes(cr, st, n, true);
     cr.restore().ok();
 }
 
@@ -1287,7 +1832,6 @@ fn draw_full_page(
 fn draw_half_page(
     cr: &cairo::Context,
     st: &mut DocState,
-    cfg: &Config,
     n: usize,
     w: f64,
     y0: f64,
@@ -1311,37 +1855,31 @@ fn draw_half_page(
     }
     cr.translate(ox, oy);
     cr.scale(scale, scale);
-    draw_strokes(cr, st, cfg, n, false);
+    draw_strokes(cr, st, n, false);
     cr.restore().ok();
 }
 
-/// Draws the not-yet-saved strokes of a page; the cairo coordinate
-/// system must already be the page's.
-fn draw_strokes(
-    cr: &cairo::Context,
-    st: &DocState,
-    cfg: &Config,
-    page_idx: usize,
-    include_current: bool,
-) {
-    let (r, g, b) = cfg.pen_rgb();
-    cr.set_source_rgb(r, g, b);
+/// Draws a page's strokes (the overlay that is frack's source of truth);
+/// the cairo coordinate system must already be the page's. Each stroke uses
+/// its own colour and width, so strokes drawn elsewhere keep their look.
+fn draw_strokes(cr: &cairo::Context, st: &DocState, page_idx: usize, include_current: bool) {
     cr.set_line_cap(cairo::LineCap::Round);
     cr.set_line_join(cairo::LineJoin::Round);
 
-    let pending = st.pending.get(&page_idx).map(|v| v.as_slice()).unwrap_or(&[]);
+    let saved = st.strokes.get(&page_idx).map(|v| v.as_slice()).unwrap_or(&[]);
     let current = if include_current && st.pos.base_page() == page_idx {
         st.current.as_ref()
     } else {
         None
     };
-    for stroke in pending.iter().chain(current) {
+    for stroke in saved.iter().chain(current) {
+        let (r, g, b) = stroke.color;
+        cr.set_source_rgb(r, g, b);
         match stroke.points.len() {
             0 => {}
             1 => {
                 let p = &stroke.points[0];
-                let w = annot::width_for(cfg.pen_width, p.pressure);
-                cr.set_line_width(w);
+                cr.set_line_width(annot::width_for(stroke.width, p.pressure));
                 cr.move_to(p.x, p.y);
                 cr.line_to(p.x, p.y);
                 let _ = cr.stroke();
@@ -1349,7 +1887,7 @@ fn draw_strokes(
             _ => {
                 for pair in stroke.points.windows(2) {
                     let w = annot::width_for(
-                        cfg.pen_width,
+                        stroke.width,
                         (pair[0].pressure + pair[1].pressure) / 2.0,
                     );
                     cr.set_line_width(w);
@@ -1359,6 +1897,106 @@ fn draw_strokes(
                 }
             }
         }
+    }
+}
+
+/// True when the stylus' current contact is the eraser end. GTK4 no longer
+/// has a separate `InputSource::Eraser` (it was removed in the 3→4 port);
+/// the eraser is told apart only by the device tool's type. The tool is read
+/// from the gesture and, as a fallback, from the current event (drivers
+/// differ on where it shows up).
+fn stylus_is_eraser(g: &gtk::GestureStylus) -> bool {
+    let event = g.upcast_ref::<gtk::EventController>().current_event();
+    let tool = g
+        .device_tool()
+        .or_else(|| event.as_ref().and_then(|e| e.device_tool()));
+    tool.as_ref().map(|t| t.tool_type()) == Some(gtk::gdk::DeviceToolType::Eraser)
+}
+
+/// Trims a stroke against an eraser disc (centre (cx, cy), radius r in page
+/// points): the parts of the polyline inside the disc are removed, splitting
+/// it into the remaining pieces (each a stroke of the same colour and width).
+/// Returns `None` when the disc does not touch the stroke (no change), or
+/// `Some(pieces)` otherwise (empty when the whole stroke is erased).
+fn trim_stroke(s: &Stroke, cx: f64, cy: f64, r: f64) -> Option<Vec<Stroke>> {
+    let r2 = r * r;
+    let inside = |p: &StrokePoint| {
+        let (dx, dy) = (p.x - cx, p.y - cy);
+        dx * dx + dy * dy <= r2
+    };
+    match s.points.as_slice() {
+        [] => None,
+        [p] => inside(p).then(Vec::new),
+        pts => {
+            let mut pieces: Vec<Vec<StrokePoint>> = Vec::new();
+            let mut cur: Vec<StrokePoint> = Vec::new();
+            let mut changed = false;
+            if inside(&pts[0]) {
+                changed = true;
+            } else {
+                cur.push(pts[0].clone());
+            }
+            for w in pts.windows(2) {
+                let (a, b) = (&w[0], &w[1]);
+                // Where the segment crosses the circle: roots of the
+                // quadratic |a + t(b-a) - c|^2 = r^2 in (0, 1).
+                let (dx, dy) = (b.x - a.x, b.y - a.y);
+                let qa = dx * dx + dy * dy;
+                let qb = 2.0 * ((a.x - cx) * dx + (a.y - cy) * dy);
+                let qc = (a.x - cx).powi(2) + (a.y - cy).powi(2) - r2;
+                let mut ts: Vec<f64> = Vec::new();
+                if qa > 1e-12 {
+                    let disc = qb * qb - 4.0 * qa * qc;
+                    if disc > 0.0 {
+                        let sq = disc.sqrt();
+                        for t in [(-qb - sq) / (2.0 * qa), (-qb + sq) / (2.0 * qa)] {
+                            if t > 1e-9 && t < 1.0 - 1e-9 {
+                                ts.push(t);
+                            }
+                        }
+                    }
+                }
+                ts.sort_by(|x, y| x.partial_cmp(y).unwrap());
+                let mut prev_inside = inside(a);
+                for t in ts {
+                    changed = true;
+                    let cp = lerp_point(a, b, t);
+                    if prev_inside {
+                        // Leaving the disc: start a fresh piece.
+                        cur = vec![cp];
+                    } else {
+                        // Entering the disc: close off the current piece.
+                        cur.push(cp);
+                        pieces.push(std::mem::take(&mut cur));
+                    }
+                    prev_inside = !prev_inside;
+                }
+                if inside(b) {
+                    changed = true;
+                } else {
+                    cur.push(b.clone());
+                }
+            }
+            if !cur.is_empty() {
+                pieces.push(cur);
+            }
+            changed.then(|| {
+                pieces
+                    .into_iter()
+                    .filter(|p| !p.is_empty())
+                    .map(|points| Stroke { points, color: s.color, width: s.width })
+                    .collect()
+            })
+        }
+    }
+}
+
+/// Linear interpolation between two stroke points (position and pressure).
+fn lerp_point(a: &StrokePoint, b: &StrokePoint, t: f64) -> StrokePoint {
+    StrokePoint {
+        x: a.x + (b.x - a.x) * t,
+        y: a.y + (b.y - a.y) * t,
+        pressure: a.pressure + (b.pressure - a.pressure) * t,
     }
 }
 
@@ -1377,7 +2015,7 @@ mod tests {
 
     /// Renders the given view position into a PNG, exactly like the
     /// draw func does, so split rendering can be checked headlessly.
-    fn render_view(st: &mut DocState, cfg: &Config, w: f64, h: f64, out: &Path) {
+    fn render_view(st: &mut DocState, w: f64, h: f64, out: &Path) {
         let surface =
             cairo::ImageSurface::create(cairo::Format::ARgb32, w as i32, h as i32).unwrap();
         {
@@ -1385,10 +2023,10 @@ mod tests {
             cr.set_source_rgb(1.0, 1.0, 1.0);
             cr.paint().unwrap();
             match st.pos {
-                ViewPos::Full(n) => draw_full_page(&cr, st, cfg, n, w, h, 1.0),
+                ViewPos::Full(n) => draw_full_page(&cr, st, n, w, h, 1.0),
                 ViewPos::Split(n) => {
-                    draw_half_page(&cr, st, cfg, n + 1, w, 0.0, h / 2.0, 1.0);
-                    draw_half_page(&cr, st, cfg, n, w, h / 2.0, h, 1.0);
+                    draw_half_page(&cr, st, n + 1, w, 0.0, h / 2.0, 1.0);
+                    draw_half_page(&cr, st, n, w, h / 2.0, h, 1.0);
                 }
             }
         }
@@ -1437,29 +2075,36 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let pdf = dir.join("two.pdf");
         make_two_page_pdf(&pdf);
-        let doc = load_document(&pdf).unwrap();
+        let (doc, strokes) = load_document(&pdf).unwrap();
+        let saved = strokes.iter().map(|(&p, v)| (p, v.len())).collect();
         let mut st = DocState {
             path: pdf.clone(),
             doc,
             n_pages: 2,
             pos: ViewPos::Split(0),
             annotate: false,
-            pending: BTreeMap::new(),
+            erase: false,
+            strokes,
+            saved,
+            rewrite: HashSet::new(),
+            undo: BTreeMap::new(),
+            redo: BTreeMap::new(),
             current: None,
+            erasing: None,
+            stylus_active: false,
             cache: BTreeMap::new(),
             thumbs: BTreeMap::new(),
             zoom: 1.0,
             view: (0.0, 0.0),
             zoom_cache: None,
         };
-        let cfg = Config::default();
         let (w, h) = (300.0, 400.0);
         let out = if let Ok(d) = std::env::var("FRACK_TEST_OUT") {
             PathBuf::from(d).join("split.png")
         } else {
             dir.join("split.png")
         };
-        render_view(&mut st, &cfg, w, h, &out);
+        render_view(&mut st, w, h, &out);
 
         // Check pixels: split shows the top half of page 2 (its bar is in
         // the bottom half, so the top region stays white) above the
@@ -1484,5 +2129,40 @@ mod tests {
         let (r, g, b) = px(150, 360);
         assert!(r > 200 && g > 200 && b > 200, "bottom region not white: {r},{g},{b}");
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    fn stroke(points: Vec<StrokePoint>, width: f64) -> Stroke {
+        Stroke { points, color: (0.0, 0.0, 0.0), width }
+    }
+
+    fn pt(x: f64, y: f64) -> StrokePoint {
+        StrokePoint { x, y, pressure: 0.5 }
+    }
+
+    #[test]
+    fn trim_splits_a_stroke_where_the_eraser_crosses() {
+        // Horizontal line y=100 from x=0..200 (radius 10 → cuts x in [90,110]).
+        let s = stroke(vec![pt(0.0, 100.0), pt(200.0, 100.0)], 2.0);
+        let pieces = trim_stroke(&s, 100.0, 100.0, ERASER_RADIUS).expect("should trim");
+        assert_eq!(pieces.len(), 2, "erasing the middle splits into two pieces");
+        let left_end = pieces[0].points.last().unwrap().x;
+        let right_start = pieces[1].points[0].x;
+        assert!((left_end - 90.0).abs() < 0.5, "left ends at {left_end}");
+        assert!((right_start - 110.0).abs() < 0.5, "right starts at {right_start}");
+        // Colour and width carry over to the pieces.
+        assert_eq!(pieces[0].width, s.width);
+
+        // Eraser far from the line: no change.
+        assert!(trim_stroke(&s, 100.0, 130.0, ERASER_RADIUS).is_none());
+
+        // A dot inside the eraser is erased entirely; outside it is untouched.
+        let dot = stroke(vec![pt(50.0, 50.0)], 1.0);
+        assert_eq!(trim_stroke(&dot, 52.0, 50.0, ERASER_RADIUS).unwrap().len(), 0);
+        assert!(trim_stroke(&dot, 70.0, 50.0, ERASER_RADIUS).is_none());
+
+        // Erasing one end leaves a single shortened piece.
+        let one = trim_stroke(&s, 0.0, 100.0, ERASER_RADIUS).expect("should trim");
+        assert_eq!(one.len(), 1);
+        assert!((one[0].points[0].x - 10.0).abs() < 0.5, "starts at {}", one[0].points[0].x);
     }
 }

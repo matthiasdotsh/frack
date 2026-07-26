@@ -7,14 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- An eraser: the stylus' eraser end erases, and a new eraser button (or
+  `e`) turns on finger/mouse erasing (mutually exclusive with the pen). It
+  rubs out the parts of a stroke it passes over — splitting the stroke and
+  keeping the rest as ordinary ink annotations — shows a circle the size of
+  the erase area, and is fully undoable/redoable. Which end of the stylus is
+  touching is read as the tool comes into range, so flipping the pen over
+  switches between drawing and erasing.
+- The stylus now draws without switching on a mode first. The pen button
+  changed meaning to "finger drawing on/off"; two fingers still zoom in
+  either case. Resting-palm touches are ignored while the stylus draws,
+  and starting to draw on the half-page view switches to the full page
+  under the pen.
+- Unlimited undo (Ctrl+Z) and redo (Ctrl+Shift+Z / Ctrl+Y), with a redo
+  button next to undo. Because strokes live in the PDF, undo reaches
+  strokes saved in an earlier session too; redo lasts for the current
+  session. Their buttons enable/disable with the current page's history.
+- Autosave: strokes are written back a few seconds after the pen is
+  lifted (in addition to on page turns and on exit), so a single-page
+  score or an unexpected shutdown no longer loses annotations.
+
 ### Changed
 
 - Freehand strokes are now saved as standard PDF ink annotations
   (ISO 32000) instead of being drawn into the page content stream. The
   page content stays untouched, so individual strokes can be deleted or
   edited afterwards with any standard PDF tool (e.g. Okular), or all of
-  them stripped with Ghostscript (see README). An embedded appearance
-  stream preserves the pressure-dependent line widths in other viewers.
+  them stripped with Ghostscript (see README). Each stroke keeps its own
+  colour and width, so annotations made in other editors are shown
+  faithfully.
 
 ## [0.2.0] - 2026-07-18
 

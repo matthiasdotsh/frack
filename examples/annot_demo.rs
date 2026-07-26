@@ -6,9 +6,16 @@
 //! visual check. Usage: annot_demo <output directory>
 
 use lopdf::{dictionary, Document, Object, Stream};
-use frack::annot::{save_strokes, Stroke, StrokePoint};
+use frack::annot::{save_changes, PageChange, Stroke, StrokePoint};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+
+const RED: (f64, f64, f64) = (0.8, 0.0, 0.0);
+const WIDTH: f64 = 2.0;
+
+fn stroke(points: Vec<StrokePoint>) -> Stroke {
+    Stroke { points, color: RED, width: WIDTH }
+}
 
 fn staff_lines_content() -> Vec<u8> {
     // Five "staff lines" across the (unrotated) page.
@@ -59,26 +66,22 @@ fn main() {
     doc.save(&pdf_path).unwrap();
 
     // Strokes in display coordinates (origin top left, y down).
-    let mut strokes = BTreeMap::new();
+    let mut changes = BTreeMap::new();
     // Page 1 (unrotated): an "X" over the staff lines (which sit at PDF
     // y 652..700, i.e. display y 92..140) plus a pressure wave.
-    strokes.insert(
+    changes.insert(
         0usize,
-        vec![
-            Stroke {
-                points: vec![
-                    StrokePoint { x: 100.0, y: 80.0, pressure: 0.6 },
-                    StrokePoint { x: 200.0, y: 160.0, pressure: 0.6 },
-                ],
-            },
-            Stroke {
-                points: vec![
-                    StrokePoint { x: 200.0, y: 80.0, pressure: 0.6 },
-                    StrokePoint { x: 100.0, y: 160.0, pressure: 0.6 },
-                ],
-            },
-            Stroke {
-                points: (0..=60)
+        PageChange::Append(vec![
+            stroke(vec![
+                StrokePoint { x: 100.0, y: 80.0, pressure: 0.6 },
+                StrokePoint { x: 200.0, y: 160.0, pressure: 0.6 },
+            ]),
+            stroke(vec![
+                StrokePoint { x: 200.0, y: 80.0, pressure: 0.6 },
+                StrokePoint { x: 100.0, y: 160.0, pressure: 0.6 },
+            ]),
+            stroke(
+                (0..=60)
                     .map(|i| {
                         let t = i as f64 / 60.0;
                         StrokePoint {
@@ -88,21 +91,19 @@ fn main() {
                         }
                     })
                     .collect(),
-            },
-        ],
+            ),
+        ]),
     );
     // Page 2 (/Rotate 90, display 792x612): horizontal line near the top
     // display edge – must appear at the top after rendering.
-    strokes.insert(
+    changes.insert(
         1usize,
-        vec![Stroke {
-            points: vec![
-                StrokePoint { x: 50.0, y: 40.0, pressure: 0.6 },
-                StrokePoint { x: 742.0, y: 40.0, pressure: 0.6 },
-            ],
-        }],
+        PageChange::Append(vec![stroke(vec![
+            StrokePoint { x: 50.0, y: 40.0, pressure: 0.6 },
+            StrokePoint { x: 742.0, y: 40.0, pressure: 0.6 },
+        ])]),
     );
 
-    save_strokes(&pdf_path, &strokes, (0.8, 0.0, 0.0), 2.0).unwrap();
+    save_changes(&pdf_path, &changes).unwrap();
     println!("geschrieben: {}", pdf_path.display());
 }
