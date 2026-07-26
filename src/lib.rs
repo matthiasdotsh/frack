@@ -4,5 +4,6 @@
 pub mod annot;
 pub mod config;
 pub mod library;
+pub mod setlist;
 pub mod tuner;
 pub mod viewer;

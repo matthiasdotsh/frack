@@ -8,6 +8,10 @@ use std::path::{Path, PathBuf};
 pub struct Config {
     /// Root directory, searched recursively for PDF files.
     pub root_dir: PathBuf,
+    /// Directory holding setlist `.txt` files. Defaults to `root_dir/setlists`
+    /// when unset (see [`Config::setlists_dir`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub setlists_dir: Option<PathBuf>,
     /// Stroke width in PDF points (at medium pressure).
     #[serde(default = "default_pen_width")]
     pub pen_width: f64,
@@ -59,6 +63,7 @@ impl Default for Config {
         let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
         Config {
             root_dir: home.join("Noten"),
+            setlists_dir: None,
             pen_width: default_pen_width(),
             pen_color: default_pen_color(),
             a4: default_a4(),
@@ -104,6 +109,14 @@ impl Config {
     pub fn pen_rgb(&self) -> (f64, f64, f64) {
         parse_hex_color(&self.pen_color).unwrap_or((0.8, 0.0, 0.0))
     }
+
+    /// Directory holding setlist files: the configured `setlists_dir`, or
+    /// `root_dir/setlists` when unset.
+    pub fn setlists_dir(&self) -> PathBuf {
+        self.setlists_dir
+            .clone()
+            .unwrap_or_else(|| self.root_dir.join("setlists"))
+    }
 }
 
 pub fn parse_hex_color(s: &str) -> Option<(f64, f64, f64)> {
@@ -120,4 +133,29 @@ pub fn parse_hex_color(s: &str) -> Option<(f64, f64, f64)> {
 /// Does the root directory exist? Used to show a hint in the library.
 pub fn root_exists(cfg: &Config) -> bool {
     Path::new(&cfg.root_dir).is_dir()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn setlists_dir_defaults_under_root() {
+        let cfg = Config {
+            root_dir: PathBuf::from("/music"),
+            setlists_dir: None,
+            ..Config::default()
+        };
+        assert_eq!(cfg.setlists_dir(), PathBuf::from("/music/setlists"));
+    }
+
+    #[test]
+    fn setlists_dir_override_wins() {
+        let cfg = Config {
+            root_dir: PathBuf::from("/music"),
+            setlists_dir: Some(PathBuf::from("/elsewhere/lists")),
+            ..Config::default()
+        };
+        assert_eq!(cfg.setlists_dir(), PathBuf::from("/elsewhere/lists"));
+    }
 }
