@@ -33,13 +33,11 @@ runCommand "frack-screenshots-up-to-date"
         echo "MISSING: assets/screenshots/$name is not committed"
         status=1
       elif [[ " $fuzzyImages " == *" $name "* ]]; then
-        # `compare` exits 1 on any difference; the pixel count decides.
-        # Its output looks like "1234 (0.0188)" or "1.2e+06 (18.3)", so
-        # let awk normalize the first field to a plain integer.
-        raw=$(compare -metric AE "$generated" "$committed/$name" null: 2>&1 || true)
-        pixels=$(printf '%s\n' "$raw" | awk 'NR == 1 { printf "%d", $1 }')
+        # `compare -metric AE`'s pixel count isn't stable across
+        # ImageMagick versions; count via a difference composite instead.
+        pixels=$(magick "$generated" "$committed/$name" -compose difference -composite -threshold 5% -format '%[fx:int(mean*w*h)]' info: 2>/dev/null || true)
         if ! [[ "$pixels" =~ ^[0-9]+$ ]]; then
-          echo "STALE: assets/screenshots/$name is not comparable ($raw)"
+          echo "STALE: assets/screenshots/$name is not comparable"
           status=1
         elif [ "$pixels" -gt "$fuzzyMaxPixels" ]; then
           echo "STALE: assets/screenshots/$name differs in $pixels pixels (allowed: $fuzzyMaxPixels)"
