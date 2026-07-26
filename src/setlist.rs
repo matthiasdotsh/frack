@@ -19,6 +19,7 @@
 //! only); it never opens the PDFs, so it stays pure and cheap to unit-test.
 
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// A page range from a `#page=` fragment, 1-based and inclusive. `None` on a
 /// side means an open end (`3-` = from 3 to the end, `-4` = start to 4).
@@ -65,6 +66,50 @@ pub struct Resolved {
     pub abs: PathBuf,
     pub exists: bool,
     pub range: Option<PageRange>,
+}
+
+/// A setlist file found in the setlists directory.
+#[derive(Clone, Debug)]
+pub struct SetlistFile {
+    pub path: PathBuf,
+    pub name: String,
+    pub mtime: SystemTime,
+}
+
+/// Lists `.txt` setlist files directly in `dir`, newest first (by mtime, then
+/// name). Hidden and non-`.txt` files are skipped; a missing or unreadable
+/// directory yields an empty list (not an error – the feature is optional).
+pub fn scan(dir: &Path) -> Vec<SetlistFile> {
+    let mut files: Vec<SetlistFile> = match std::fs::read_dir(dir) {
+        Ok(rd) => rd,
+        Err(_) => return Vec::new(),
+    }
+    .filter_map(|e| e.ok())
+    .filter(|e| {
+        !e.file_name().to_string_lossy().starts_with('.')
+            && e.path()
+                .extension()
+                .is_some_and(|x| x.eq_ignore_ascii_case("txt"))
+    })
+    .map(|e| {
+        let path = e.path();
+        let mtime = e
+            .metadata()
+            .and_then(|m| m.modified())
+            .unwrap_or(UNIX_EPOCH);
+        SetlistFile {
+            name: display_name(&path),
+            path,
+            mtime,
+        }
+    })
+    .collect();
+    files.sort_by(|a, b| {
+        b.mtime
+            .cmp(&a.mtime)
+            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+    });
+    files
 }
 
 /// The display name of a setlist file: its file name without the extension
@@ -291,6 +336,28 @@ mod tests {
             display_name(Path::new("/x/2025-11-14-autumn-concert.txt")),
             "2025-11-14-autumn-concert"
         );
+    }
+
+    #[test]
+    fn scan_lists_txt_skipping_hidden_and_non_txt() {
+        let dir = std::env::temp_dir().join(format!("frack-slscan-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("herbst.txt"), b"a.pdf\n").unwrap();
+        std::fs::write(dir.join("uebeliste.txt"), b"b.pdf\n").unwrap();
+        std::fs::write(dir.join(".hidden.txt"), b"x.pdf\n").unwrap();
+        std::fs::write(dir.join("note.pdf"), b"%PDF-1.5\n").unwrap();
+
+        let mut names: Vec<String> = scan(&dir).into_iter().map(|s| s.name).collect();
+        names.sort();
+        assert_eq!(names, ["herbst", "uebeliste"]);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn scan_missing_dir_is_empty() {
+        assert!(scan(Path::new("/no/such/frack/setlists")).is_empty());
     }
 
     #[test]

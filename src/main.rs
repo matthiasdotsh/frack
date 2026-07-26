@@ -1,14 +1,120 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 matthias
 
-use frack::{config, library, tuner, viewer};
+use frack::{config, library, setlist, tuner, viewer};
 
 use gtk::glib;
 use gtk::prelude::*;
 use gtk4 as gtk;
 use std::cell::RefCell;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
+
+/// Maximum number of setlists shown in the library while the search is empty.
+/// Older ones stay reachable by typing; recency keeps the view uncluttered.
+const RECENT_SETLISTS: usize = 6;
+
+/// A row in the library list, carrying an index into the setlists or scores
+/// vector (by list position). Section headers are not rows – they are drawn
+/// by the list's header function, so they never take focus or an index.
+enum LibRow {
+    Setlist(usize),
+    Score(usize),
+}
+
+/// A row in the setlist view: a `#` line rendered as a section header, or an
+/// entry carrying its index into the resolved-entries vector.
+enum SlRow {
+    Section,
+    Entry(usize),
+}
+
+/// The setlist currently open in the setlist view / being played, kept so the
+/// viewer's back button returns to it and (later) turning can cross pieces.
+struct Active {
+    setlist: setlist::Setlist,
+    resolved: Vec<setlist::Resolved>,
+}
+
+/// Case-insensitive: all whitespace-separated terms occur in the name.
+fn setlist_matches(name: &str, query: &str) -> bool {
+    let hay = name.to_lowercase();
+    query
+        .split_whitespace()
+        .all(|t| hay.contains(&t.to_lowercase()))
+}
+
+/// A short "(S. …)" hint for a page range, for display in the setlist view.
+fn range_hint(range: &Option<setlist::PageRange>) -> String {
+    match range {
+        Some(setlist::PageRange::Valid { lo, hi }) => match (lo, hi) {
+            (Some(a), Some(b)) if a == b => format!("  (S. {a})"),
+            (Some(a), Some(b)) => format!("  (S. {a}–{b})"),
+            (Some(a), None) => format!("  (S. {a}–)"),
+            (None, Some(b)) => format!("  (S. –{b})"),
+            (None, None) => String::new(),
+        },
+        Some(setlist::PageRange::Invalid) => "  (Seiten?)".to_string(),
+        None => String::new(),
+    }
+}
+
+/// A non-activatable section header row for a `gtk::ListBox`.
+fn header_row(text: &str) -> gtk::ListBoxRow {
+    let label = gtk::Label::new(None);
+    label.set_markup(&format!("<b>{text}</b>"));
+    label.set_xalign(0.0);
+    label.set_margin_top(10);
+    label.set_margin_bottom(4);
+    label.set_margin_start(8);
+    label.set_margin_end(8);
+    label.add_css_class("dim-label");
+    let row = gtk::ListBoxRow::new();
+    row.set_child(Some(&label));
+    row.set_activatable(false);
+    row.set_selectable(false);
+    // Not focusable, so keyboard/pedal cursor movement skips the header and
+    // lands on the first real item.
+    row.set_focusable(false);
+    row
+}
+
+/// A section-header label for a `gtk::ListBox` header function. Unlike a row,
+/// a header never takes focus and is not counted in `row.index()`.
+fn section_label(text: &str) -> gtk::Label {
+    let label = gtk::Label::new(None);
+    label.set_markup(&format!("<b>{text}</b>"));
+    label.set_xalign(0.0);
+    label.set_margin_top(10);
+    label.set_margin_bottom(4);
+    label.set_margin_start(8);
+    label.set_margin_end(8);
+    label.add_css_class("dim-label");
+    label
+}
+
+/// An activatable list row whose child is a left-aligned label with `text`.
+/// A themed symbolic icon (by name, e.g. `view-list-symbolic`) is prepended
+/// when given – symbolic icons render everywhere the icon theme is present,
+/// unlike emoji, which need a colour-emoji font the screenshot VM lacks.
+fn item_row(text: &str, icon: Option<&str>) -> gtk::ListBoxRow {
+    let content = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    content.set_margin_top(10);
+    content.set_margin_bottom(10);
+    content.set_margin_start(8);
+    content.set_margin_end(8);
+    if let Some(icon) = icon {
+        content.append(&gtk::Image::from_icon_name(icon));
+    }
+    let label = gtk::Label::new(Some(text));
+    label.set_xalign(0.0);
+    label.set_hexpand(true);
+    label.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
+    content.append(&label);
+    let row = gtk::ListBoxRow::new();
+    row.set_child(Some(&content));
+    row
+}
 
 fn main() -> glib::ExitCode {
     // Optional library directory as the only argument; it overrides
@@ -168,27 +274,220 @@ fn build_ui(app: &gtk::Application, root_override: Option<PathBuf>) {
         });
     }
 
-    // ----- Populate and filter the library -----
-    let entries: Rc<RefCell<Vec<library::Entry>>> = Rc::new(RefCell::new(Vec::new()));
+    // ----- Setlist view (third stack page) -----
+    let sl_list = gtk::ListBox::new();
+    sl_list.set_selection_mode(gtk::SelectionMode::None);
+    let sl_scrolled = gtk::ScrolledWindow::new();
+    sl_scrolled.set_child(Some(&sl_list));
+    sl_scrolled.set_vexpand(true);
+    let sl_back = gtk::Button::from_icon_name("go-previous-symbolic");
+    sl_back.set_tooltip_text(Some("Zur Bibliothek"));
+    let sl_title = gtk::Label::new(None);
+    sl_title.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
+    sl_title.set_xalign(0.0);
+    sl_title.set_hexpand(true);
+    let sl_header = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    sl_header.append(&sl_back);
+    sl_header.append(&sl_title);
+    let slbox = gtk::Box::new(gtk::Orientation::Vertical, 6);
+    slbox.set_margin_top(6);
+    slbox.set_margin_bottom(6);
+    slbox.set_margin_start(6);
+    slbox.set_margin_end(6);
+    slbox.append(&sl_header);
+    slbox.append(&sl_scrolled);
+    stack.add_named(&slbox, Some("setlist"));
+    // In fullscreen the header bar (with its back button) is hidden; the
+    // in-page back button then takes over, mirroring the library.
+    window
+        .bind_property("fullscreened", &sl_back, "visible")
+        .sync_create()
+        .build();
+
+    // ----- Shared library / setlist state -----
+    let setlists: Rc<RefCell<Vec<setlist::SetlistFile>>> = Rc::new(RefCell::new(Vec::new()));
+    let scores: Rc<RefCell<Vec<library::Entry>>> = Rc::new(RefCell::new(Vec::new()));
+    let rows: Rc<RefCell<Vec<LibRow>>> = Rc::new(RefCell::new(Vec::new()));
+    let sl_rows: Rc<RefCell<Vec<SlRow>>> = Rc::new(RefCell::new(Vec::new()));
+    let active: Rc<RefCell<Option<Active>>> = Rc::new(RefCell::new(None));
+
+    // Show the viewer chrome (used when opening from the library or a setlist).
+    let enter_viewer: Rc<dyn Fn()> = {
+        let stack = stack.clone();
+        let back = back.clone();
+        let pen = pen.clone();
+        let erase = erase.clone();
+        let undo = undo.clone();
+        let redo = redo.clone();
+        let refresh = refresh.clone();
+        Rc::new(move || {
+            stack.set_visible_child_name("viewer");
+            back.set_visible(true);
+            pen.set_visible(true);
+            erase.set_visible(true);
+            undo.set_visible(true);
+            redo.set_visible(true);
+            refresh.set_visible(false);
+        })
+    };
+
+    let show_library: Rc<dyn Fn()> = {
+        let viewer = viewer.clone();
+        let stack = stack.clone();
+        let back = back.clone();
+        let refresh = refresh.clone();
+        let pen = pen.clone();
+        let erase = erase.clone();
+        let undo = undo.clone();
+        let redo = redo.clone();
+        let status = status.clone();
+        let search = search.clone();
+        let active = active.clone();
+        Rc::new(move || {
+            viewer.close();
+            active.borrow_mut().take();
+            stack.set_visible_child_name("library");
+            back.set_visible(false);
+            pen.set_visible(false);
+            erase.set_visible(false);
+            undo.set_visible(false);
+            redo.set_visible(false);
+            refresh.set_visible(true);
+            status.set_text("Bibliothek");
+            search.grab_focus();
+        })
+    };
+
+    // Populate the setlist page from the active setlist and switch to it.
+    let show_setlist_view: Rc<dyn Fn()> = {
+        let viewer = viewer.clone();
+        let stack = stack.clone();
+        let back = back.clone();
+        let pen = pen.clone();
+        let erase = erase.clone();
+        let undo = undo.clone();
+        let redo = redo.clone();
+        let refresh = refresh.clone();
+        let status = status.clone();
+        let sl_list = sl_list.clone();
+        let sl_title = sl_title.clone();
+        let sl_rows = sl_rows.clone();
+        let active = active.clone();
+        Rc::new(move || {
+            viewer.close();
+            while let Some(row) = sl_list.first_child() {
+                sl_list.remove(&row);
+            }
+            let mut model: Vec<SlRow> = Vec::new();
+            if let Some(a) = active.borrow().as_ref() {
+                sl_title.set_text(&a.setlist.name);
+                status.set_text(&a.setlist.name);
+                let mut ei = 0usize;
+                for line in &a.setlist.lines {
+                    match line {
+                        setlist::Line::Comment(s) => {
+                            model.push(SlRow::Section);
+                            sl_list.append(&header_row(s));
+                        }
+                        setlist::Line::Entry(_) => {
+                            let r = &a.resolved[ei];
+                            let text = format!("{}{}", r.rel, range_hint(&r.range));
+                            let row = item_row(&text, Some("audio-x-generic-symbolic"));
+                            // Missing entries are inert for now; Stufe 5 adds
+                            // the placeholder page you can turn onto.
+                            row.set_sensitive(r.exists);
+                            sl_list.append(&row);
+                            model.push(SlRow::Entry(ei));
+                            ei += 1;
+                        }
+                    }
+                }
+            }
+            *sl_rows.borrow_mut() = model;
+            stack.set_visible_child_name("setlist");
+            back.set_visible(true);
+            pen.set_visible(false);
+            erase.set_visible(false);
+            undo.set_visible(false);
+            redo.set_visible(false);
+            refresh.set_visible(false);
+        })
+    };
+
+    let open_in_viewer: Rc<dyn Fn(&Path) -> bool> = {
+        let viewer = viewer.clone();
+        let enter_viewer = enter_viewer.clone();
+        let info = info.clone();
+        Rc::new(move |path: &Path| match viewer.open(path) {
+            Ok(()) => {
+                enter_viewer();
+                true
+            }
+            Err(e) => {
+                info.set_text(&format!("Kann {} nicht öffnen: {e}", path.display()));
+                info.set_visible(true);
+                false
+            }
+        })
+    };
+
+    let open_setlist: Rc<dyn Fn(&Path)> = {
+        let cfg = cfg.clone();
+        let active = active.clone();
+        let show_setlist_view = show_setlist_view.clone();
+        let info = info.clone();
+        Rc::new(move |path: &Path| match setlist::load(path) {
+            Ok(sl) => {
+                let resolved = sl.resolve(&cfg.root_dir);
+                *active.borrow_mut() = Some(Active {
+                    setlist: sl,
+                    resolved,
+                });
+                show_setlist_view();
+            }
+            Err(e) => {
+                info.set_text(&format!("Kann Setlist {} nicht lesen: {e}", path.display()));
+                info.set_visible(true);
+            }
+        })
+    };
+
+    // From the viewer, "back" returns to the setlist it was opened from, or to
+    // the library if it was opened directly.
+    let back_from_viewer: Rc<dyn Fn()> = {
+        let active = active.clone();
+        let show_library = show_library.clone();
+        let show_setlist_view = show_setlist_view.clone();
+        Rc::new(move || {
+            if active.borrow().is_some() {
+                show_setlist_view();
+            } else {
+                show_library();
+            }
+        })
+    };
 
     let populate: Rc<dyn Fn()> = {
         let cfg = cfg.clone();
-        let entries = entries.clone();
+        let setlists = setlists.clone();
+        let scores = scores.clone();
+        let rows = rows.clone();
         let list = list.clone();
         let info = info.clone();
         Rc::new(move || {
             while let Some(row) = list.first_child() {
                 list.remove(&row);
             }
+            let sls = setlist::scan(&cfg.setlists_dir());
             let found = library::scan(&cfg.root_dir);
-            for e in &found {
-                let label = gtk::Label::new(Some(&e.rel));
-                label.set_xalign(0.0);
-                label.set_margin_top(10);
-                label.set_margin_bottom(10);
-                label.set_margin_start(8);
-                label.set_margin_end(8);
-                list.append(&label);
+            let mut model: Vec<LibRow> = Vec::new();
+            for (i, s) in sls.iter().enumerate() {
+                model.push(LibRow::Setlist(i));
+                list.append(&item_row(&s.name, Some("view-list-symbolic")));
+            }
+            for (i, e) in found.iter().enumerate() {
+                model.push(LibRow::Score(i));
+                list.append(&item_row(&e.rel, Some("audio-x-generic-symbolic")));
             }
             let mut msg = String::new();
             if cfg_created {
@@ -210,98 +509,152 @@ fn build_ui(app: &gtk::Application, root_override: Option<PathBuf>) {
             }
             info.set_text(msg.trim_end());
             info.set_visible(!msg.trim_end().is_empty());
-            *entries.borrow_mut() = found;
+            *setlists.borrow_mut() = sls;
+            *scores.borrow_mut() = found;
+            *rows.borrow_mut() = model;
+            list.invalidate_headers();
+            list.invalidate_filter();
         })
     };
-    populate();
 
+    // Section headers ("Setlisten" / "Noten") drawn above the first row of
+    // each section. They are not rows, so they never take keyboard focus and
+    // vanish automatically when a section is filtered away.
     {
-        let entries = entries.clone();
-        let search2 = search.clone();
-        list.set_filter_func(move |row| {
-            let query = search2.text();
-            if query.is_empty() {
-                return true;
+        let rows = rows.clone();
+        list.set_header_func(move |row, before| {
+            let rows = rows.borrow();
+            let cur = rows.get(row.index() as usize);
+            let prev = before.and_then(|b| rows.get(b.index() as usize));
+            let text = match (cur, prev) {
+                (Some(LibRow::Setlist(_)), None) => Some("Setlisten"),
+                (Some(LibRow::Score(_)), None | Some(LibRow::Setlist(_))) => Some("Noten"),
+                _ => None,
+            };
+            match text {
+                Some(t) => row.set_header(Some(&section_label(t))),
+                None => row.set_header(None::<&gtk::Widget>),
             }
-            entries
-                .borrow()
-                .get(row.index() as usize)
-                .map(|e| library::matches(e, &query))
-                .unwrap_or(true)
         });
     }
     {
+        let rows = rows.clone();
+        let setlists = setlists.clone();
+        let scores = scores.clone();
+        let search = search.clone();
+        list.set_filter_func(move |row| {
+            let q = search.text();
+            let rows = rows.borrow();
+            match rows.get(row.index() as usize) {
+                Some(LibRow::Setlist(i)) => {
+                    if q.is_empty() {
+                        *i < RECENT_SETLISTS
+                    } else {
+                        setlists
+                            .borrow()
+                            .get(*i)
+                            .is_some_and(|s| setlist_matches(&s.name, &q))
+                    }
+                }
+                Some(LibRow::Score(i)) => {
+                    if q.is_empty() {
+                        true
+                    } else {
+                        scores
+                            .borrow()
+                            .get(*i)
+                            .is_some_and(|e| library::matches(e, &q))
+                    }
+                }
+                None => true,
+            }
+        });
+    }
+    populate();
+    {
         let list = list.clone();
-        search.connect_search_changed(move |_| list.invalidate_filter());
+        search.connect_search_changed(move |_| {
+            list.invalidate_filter();
+            list.invalidate_headers();
+        });
     }
     {
         let populate = populate.clone();
         refresh.connect_clicked(move |_| populate());
     }
 
-    // ----- Switching between library and viewer -----
-    let show_library: Rc<dyn Fn()> = {
-        let viewer = viewer.clone();
-        let stack = stack.clone();
-        let back = back.clone();
-        let refresh = refresh.clone();
-        let pen = pen.clone();
-        let erase = erase.clone();
-        let undo = undo.clone();
-        let redo = redo.clone();
-        let status = status.clone();
-        let search = search.clone();
-        Rc::new(move || {
-            viewer.close();
-            stack.set_visible_child_name("library");
-            back.set_visible(false);
-            pen.set_visible(false);
-            erase.set_visible(false);
-            undo.set_visible(false);
-            redo.set_visible(false);
-            refresh.set_visible(true);
-            status.set_text("Bibliothek");
-            search.grab_focus();
-        })
-    };
-
+    // ----- Activating library rows -----
     {
-        let entries = entries.clone();
-        let viewer = viewer.clone();
-        let stack = stack.clone();
-        let back = back.clone();
-        let refresh = refresh.clone();
-        let pen = pen.clone();
-        let erase = erase.clone();
-        let undo = undo.clone();
-        let redo = redo.clone();
-        let info = info.clone();
+        let rows = rows.clone();
+        let setlists = setlists.clone();
+        let scores = scores.clone();
+        let active = active.clone();
+        let open_in_viewer = open_in_viewer.clone();
+        let open_setlist = open_setlist.clone();
         list.connect_row_activated(move |_, row| {
-            let path = match entries.borrow().get(row.index() as usize) {
-                Some(e) => e.path.clone(),
-                None => return,
+            enum Act {
+                Setlist(PathBuf),
+                Score(PathBuf),
+            }
+            let act = match rows.borrow().get(row.index() as usize) {
+                Some(LibRow::Setlist(i)) => {
+                    setlists.borrow().get(*i).map(|s| Act::Setlist(s.path.clone()))
+                }
+                Some(LibRow::Score(i)) => {
+                    scores.borrow().get(*i).map(|e| Act::Score(e.path.clone()))
+                }
+                _ => None,
             };
-            match viewer.open(&path) {
-                Ok(()) => {
-                    stack.set_visible_child_name("viewer");
-                    back.set_visible(true);
-                    pen.set_visible(true);
-                    erase.set_visible(true);
-                    undo.set_visible(true);
-                    redo.set_visible(true);
-                    refresh.set_visible(false);
+            match act {
+                Some(Act::Setlist(p)) => open_setlist(&p),
+                Some(Act::Score(p)) => {
+                    active.borrow_mut().take(); // opened directly: no setlist context
+                    open_in_viewer(&p);
                 }
-                Err(e) => {
-                    info.set_text(&format!("Kann {} nicht öffnen: {e}", path.display()));
-                    info.set_visible(true);
-                }
+                None => {}
             }
         });
     }
 
+    // ----- Activating setlist entries -----
+    {
+        let sl_rows = sl_rows.clone();
+        let active = active.clone();
+        let open_in_viewer = open_in_viewer.clone();
+        sl_list.connect_row_activated(move |_, row| {
+            let ei = match sl_rows.borrow().get(row.index() as usize) {
+                Some(SlRow::Entry(e)) => Some(*e),
+                _ => None,
+            };
+            if let Some(ei) = ei {
+                let target = active
+                    .borrow()
+                    .as_ref()
+                    .and_then(|a| a.resolved.get(ei))
+                    .map(|r| (r.abs.clone(), r.exists));
+                // `active` stays set, so the viewer's back returns here.
+                if let Some((abs, true)) = target {
+                    open_in_viewer(&abs);
+                }
+            }
+        });
+    }
     {
         let show_library = show_library.clone();
-        back.connect_clicked(move |_| show_library());
+        sl_back.connect_clicked(move |_| show_library());
+    }
+
+    {
+        let stack = stack.clone();
+        let back_from_viewer = back_from_viewer.clone();
+        let show_library = show_library.clone();
+        back.connect_clicked(move |_| {
+            if stack.visible_child_name().as_deref() == Some("setlist") {
+                show_library();
+            } else {
+                back_from_viewer();
+            }
+        });
     }
     {
         let viewer = viewer.clone();
@@ -362,8 +715,8 @@ fn build_ui(app: &gtk::Application, root_override: Option<PathBuf>) {
         actions.append(&fullscreen);
 
         {
-            let show_library = show_library.clone();
-            back2.connect_clicked(move |_| show_library());
+            let back_from_viewer = back_from_viewer.clone();
+            back2.connect_clicked(move |_| back_from_viewer());
         }
         {
             let viewer = viewer.clone();
@@ -391,6 +744,7 @@ fn build_ui(app: &gtk::Application, root_override: Option<PathBuf>) {
         let stack = stack.clone();
         let window2 = window.clone();
         let show_library = show_library.clone();
+        let back_from_viewer = back_from_viewer.clone();
         let pen = pen.clone();
         let erase = erase.clone();
         let keys = gtk::EventControllerKey::new();
@@ -407,6 +761,14 @@ fn build_ui(app: &gtk::Application, root_override: Option<PathBuf>) {
             if key == Key::t {
                 tuner_btn.set_active(!tuner_btn.is_active());
                 return glib::Propagation::Stop;
+            }
+            // In the setlist view, Escape steps back to the library.
+            if stack.visible_child_name().as_deref() == Some("setlist") {
+                if key == Key::Escape {
+                    show_library();
+                    return glib::Propagation::Stop;
+                }
+                return glib::Propagation::Proceed;
             }
             let in_viewer = stack.visible_child_name().as_deref() == Some("viewer");
             if !in_viewer {
@@ -427,7 +789,7 @@ fn build_ui(app: &gtk::Application, root_override: Option<PathBuf>) {
                     } else if window2.is_fullscreen() {
                         window2.unfullscreen();
                     } else {
-                        show_library();
+                        back_from_viewer();
                     }
                     glib::Propagation::Stop
                 }
