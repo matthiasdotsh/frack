@@ -235,6 +235,11 @@ pub struct Viewer {
     nav_scale: gtk::Scale,
     nav_label: gtk::Label,
     nav_actions: gtk::Box,
+    /// Overlay line mirroring the header status, which is hidden in fullscreen:
+    /// the current piece's name, prefixed with the setlist position
+    /// ("2/3 · name") while a playlist is playing. Shown whenever a document is
+    /// open, so on stage you always see what you are on.
+    overlay_title: gtk::Label,
     /// True while the slider is being updated programmatically.
     nav_updating: Rc<std::cell::Cell<bool>>,
     /// Debounce timer: jump only once the slider value settles.
@@ -284,6 +289,11 @@ impl Viewer {
         slider_row.append(&nav_scale);
         slider_row.append(&nav_label);
         let nav_actions = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        // Title line at the top of the overlay (see field docs).
+        let overlay_title = gtk::Label::new(None);
+        overlay_title.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
+        overlay_title.set_halign(gtk::Align::Center);
+        overlay_title.set_visible(false);
         // Preview tile shown above the slider while scrubbing: a page
         // thumbnail plus a large page number.
         let preview_area = gtk::DrawingArea::new();
@@ -297,6 +307,7 @@ impl Viewer {
         preview_box.append(&preview_label);
         preview_box.set_visible(false);
         let nav_box = gtk::Box::new(gtk::Orientation::Vertical, 8);
+        nav_box.append(&overlay_title);
         nav_box.append(&preview_box);
         nav_box.add_css_class("osd");
         nav_box.add_css_class("toolbar");
@@ -328,6 +339,7 @@ impl Viewer {
             nav_scale,
             nav_label,
             nav_actions,
+            overlay_title,
             nav_updating: Rc::new(std::cell::Cell::new(false)),
             nav_timer: Rc::new(RefCell::new(None)),
             preview_box,
@@ -982,7 +994,10 @@ impl Viewer {
     pub fn update_status(&self) {
         let guard = self.state.borrow();
         let text = match guard.as_ref() {
-            None => "Bibliothek".to_string(),
+            None => {
+                self.overlay_title.set_visible(false);
+                "Bibliothek".to_string()
+            }
             Some(st) => {
                 let name = st
                     .path
@@ -1000,6 +1015,10 @@ impl Viewer {
                     .as_ref()
                     .map(|pl| format!("{}/{} · ", pl.index + 1, pl.entries.len()))
                     .unwrap_or_default();
+                // The header status is hidden in fullscreen; mirror the piece
+                // name (with the setlist position, if any) into the overlay.
+                self.overlay_title.set_text(&format!("{prefix}{name}"));
+                self.overlay_title.set_visible(true);
                 format!("{prefix}{name} – {pos}{pen}")
             }
         };
