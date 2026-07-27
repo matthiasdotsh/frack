@@ -230,9 +230,50 @@ impl Setlist {
     }
 }
 
+/// Result of checking a setlist's entries against the filesystem, for the
+/// pre-concert warning.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Preflight {
+    /// Number of entries (comments excluded).
+    pub total: usize,
+    /// Relative paths of entries whose file is missing.
+    pub missing: Vec<String>,
+}
+
+/// Existence-only check of already-resolved entries. Cheap (a stat per entry
+/// during [`Setlist::resolve`]); PDF and range validity are not checked here.
+pub fn preflight(resolved: &[Resolved]) -> Preflight {
+    Preflight {
+        total: resolved.len(),
+        missing: resolved
+            .iter()
+            .filter(|r| !r.exists)
+            .map(|r| r.rel.clone())
+            .collect(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn preflight_lists_missing_entries_in_order() {
+        let entry = |rel: &str, exists: bool| Resolved {
+            rel: rel.to_string(),
+            abs: PathBuf::from("/x").join(rel),
+            exists,
+            range: None,
+        };
+        let resolved = vec![
+            entry("a.pdf", true),
+            entry("b.pdf", false),
+            entry("c.pdf", false),
+        ];
+        let pf = preflight(&resolved);
+        assert_eq!(pf.total, 3);
+        assert_eq!(pf.missing, vec!["b.pdf".to_string(), "c.pdf".to_string()]);
+    }
 
     fn valid(lo: Option<usize>, hi: Option<usize>) -> Option<PageRange> {
         Some(PageRange::Valid { lo, hi })

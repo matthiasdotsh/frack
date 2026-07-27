@@ -108,8 +108,9 @@ fn section_label(text: &str) -> gtk::Label {
 /// An activatable list row whose child is a left-aligned label with `text`.
 /// A themed symbolic icon (by name, e.g. `view-list-symbolic`) is prepended
 /// when given – symbolic icons render everywhere the icon theme is present,
-/// unlike emoji, which need a colour-emoji font the screenshot VM lacks.
-fn item_row(text: &str, icon: Option<&str>) -> gtk::ListBoxRow {
+/// unlike emoji, which need a colour-emoji font the screenshot VM lacks. When
+/// `warn`, a warning icon is appended at the trailing edge (missing entries).
+fn item_row(text: &str, icon: Option<&str>, warn: bool) -> gtk::ListBoxRow {
     let content = gtk::Box::new(gtk::Orientation::Horizontal, 6);
     content.set_margin_top(10);
     content.set_margin_bottom(10);
@@ -123,6 +124,11 @@ fn item_row(text: &str, icon: Option<&str>) -> gtk::ListBoxRow {
     label.set_hexpand(true);
     label.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
     content.append(&label);
+    if warn {
+        let badge = gtk::Image::from_icon_name("dialog-warning-symbolic");
+        badge.set_tooltip_text(Some("Enthält fehlende Stücke"));
+        content.append(&badge);
+    }
     let row = gtk::ListBoxRow::new();
     row.set_child(Some(&content));
     row
@@ -307,7 +313,18 @@ fn build_ui(app: &gtk::Application, root_override: Option<PathBuf>) {
     slbox.set_margin_bottom(6);
     slbox.set_margin_start(6);
     slbox.set_margin_end(6);
+    // Pre-concert banner: warns about missing pieces, non-blocking.
+    let sl_banner_label = gtk::Label::new(None);
+    sl_banner_label.set_wrap(true);
+    sl_banner_label.set_xalign(0.0);
+    let sl_banner = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    sl_banner.set_margin_start(8);
+    sl_banner.set_margin_end(8);
+    sl_banner.append(&gtk::Image::from_icon_name("dialog-warning-symbolic"));
+    sl_banner.append(&sl_banner_label);
+    sl_banner.set_visible(false);
     slbox.append(&sl_header);
+    slbox.append(&sl_banner);
     slbox.append(&sl_scrolled);
     stack.add_named(&slbox, Some("setlist"));
     // In fullscreen the header bar (with its back button) is hidden; the
@@ -385,17 +402,32 @@ fn build_ui(app: &gtk::Application, root_override: Option<PathBuf>) {
         let sl_list = sl_list.clone();
         let sl_title = sl_title.clone();
         let sl_rows = sl_rows.clone();
+        let sl_banner = sl_banner.clone();
+        let sl_banner_label = sl_banner_label.clone();
         let active = active.clone();
         Rc::new(move || {
             viewer.close();
             while let Some(row) = sl_list.first_child() {
                 sl_list.remove(&row);
             }
+            sl_banner.set_visible(false);
             let mut model: Vec<SlRow> = Vec::new();
             let mut current_row: Option<gtk::ListBoxRow> = None;
             if let Some(a) = active.borrow().as_ref() {
                 sl_title.set_text(&a.setlist.name);
                 status.set_text(&a.setlist.name);
+                // Pre-flight: warn up front about missing pieces (non-blocking).
+                let pf = setlist::preflight(&a.resolved);
+                if !pf.missing.is_empty() {
+                    let verb = if pf.missing.len() == 1 { "fehlt" } else { "fehlen" };
+                    sl_banner_label.set_text(&format!(
+                        "{} von {} {verb}: {}",
+                        pf.missing.len(),
+                        pf.total,
+                        pf.missing.join(", ")
+                    ));
+                    sl_banner.set_visible(true);
+                }
                 let mut ei = 0usize;
                 for line in &a.setlist.lines {
                     match line {
@@ -406,7 +438,7 @@ fn build_ui(app: &gtk::Application, root_override: Option<PathBuf>) {
                         setlist::Line::Entry(_) => {
                             let r = &a.resolved[ei];
                             let text = format!("{}{}", r.rel, range_hint(&r.range));
-                            let row = item_row(&text, Some("audio-x-generic-symbolic"));
+                            let row = item_row(&text, Some("audio-x-generic-symbolic"), false);
                             // Missing entries are inert for now; Stufe 5 adds
                             // the placeholder page you can turn onto.
                             row.set_sensitive(r.exists);
@@ -503,14 +535,27 @@ fn build_ui(app: &gtk::Application, root_override: Option<PathBuf>) {
             }
             let sls = setlist::scan(&cfg.setlists_dir());
             let found = library::scan(&cfg.root_dir);
+            // Pre-flight the setlists shown by default so a missing piece is
+            // flagged with a badge right in the library (bounded to the visible
+            // few to keep the scan cheap).
+            let warn: Vec<bool> = sls
+                .iter()
+                .enumerate()
+                .map(|(i, s)| {
+                    i < RECENT_SETLISTS
+                        && setlist::load(&s.path)
+                            .map(|sl| !setlist::preflight(&sl.resolve(&cfg.root_dir)).missing.is_empty())
+                            .unwrap_or(false)
+                })
+                .collect();
             let mut model: Vec<LibRow> = Vec::new();
             for (i, s) in sls.iter().enumerate() {
                 model.push(LibRow::Setlist(i));
-                list.append(&item_row(&s.name, Some("view-list-symbolic")));
+                list.append(&item_row(&s.name, Some("view-list-symbolic"), warn[i]));
             }
             for (i, e) in found.iter().enumerate() {
                 model.push(LibRow::Score(i));
-                list.append(&item_row(&e.rel, Some("audio-x-generic-symbolic")));
+                list.append(&item_row(&e.rel, Some("audio-x-generic-symbolic"), false));
             }
             let mut msg = String::new();
             if cfg_created {
