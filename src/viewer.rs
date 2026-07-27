@@ -451,7 +451,7 @@ impl Viewer {
         self.close();
         let abs = std::fs::canonicalize(path).map_err(|e| e.to_string())?;
         let (doc, strokes) = load_document(&abs)?;
-        let n_pages = doc.n_pages().max(0) as usize;
+        let n_pages = with_poppler(|| doc.n_pages()).max(0) as usize;
         if n_pages == 0 {
             return Err("PDF has no pages".to_string());
         }
@@ -1203,9 +1203,9 @@ impl Viewer {
                 // Eraser cursor: a circle the size of the erase radius.
                 if let Some(pass) = st.erasing.as_ref()
                     && let ViewPos::Full(n) = st.pos
-                    && let Some(page) = st.doc.page(n as i32)
+                    && let Some(page) = with_poppler(|| st.doc.page(n as i32))
                 {
-                    let (pw, ph) = page.size();
+                    let (pw, ph) = with_poppler(|| page.size());
                     let (scale, _, _) = view_transform(st, w, h, pw, ph);
                     let (cx, cy) = pass.cursor;
                     cr.set_source_rgba(0.3, 0.3, 0.3, 0.9);
@@ -1378,8 +1378,8 @@ impl Viewer {
             st.current = None;
             st.erasing = None;
             let ViewPos::Full(n) = st.pos else { return };
-            let Some(page) = st.doc.page(n as i32) else { return };
-            let (pw, ph) = page.size();
+            let Some(page) = with_poppler(|| st.doc.page(n as i32)) else { return };
+            let (pw, ph) = with_poppler(|| page.size());
             let (_, ox, oy) = view_transform(st, w, h, pw, ph);
             let (cx, cy) = g.bounding_box_center().unwrap_or((w / 2.0, h / 2.0));
             *v.pinch.borrow_mut() = Some(PinchStart {
@@ -1399,8 +1399,8 @@ impl Viewer {
             let mut guard = v.state.borrow_mut();
             let Some(st) = guard.as_mut() else { return };
             let ViewPos::Full(n) = st.pos else { return };
-            let Some(page) = st.doc.page(n as i32) else { return };
-            let (pw, ph) = page.size();
+            let Some(page) = with_poppler(|| st.doc.page(n as i32)) else { return };
+            let (pw, ph) = with_poppler(|| page.size());
             let (s0, _, _) = full_layout(w, h, pw, ph);
             let new_zoom = (start.zoom * factor).clamp(1.0, MAX_ZOOM);
             if new_zoom <= 1.01 {
@@ -1743,8 +1743,8 @@ impl Viewer {
     /// which drawing switches to via [`stroke_begin`].
     fn widget_to_page(&self, st: &DocState, x: f64, y: f64, pressure: f64) -> Option<StrokePoint> {
         let ViewPos::Full(n) = st.pos else { return None };
-        let page = st.doc.page(n as i32)?;
-        let (pw, ph) = page.size();
+        let page = with_poppler(|| st.doc.page(n as i32))?;
+        let (pw, ph) = with_poppler(|| page.size());
         let (scale, ox, oy) = view_transform(
             st,
             self.area.width() as f64,
@@ -1825,10 +1825,23 @@ fn step_index(index: usize, len: usize, dir: i32) -> Option<usize> {
 /// Loads the document for rendering (Poppler) together with its strokes.
 /// The ink annotations are stripped from the copy Poppler sees – frack
 /// draws them itself – so they never render twice.
+/// Poppler has process-global state and is not thread-safe, so every call into
+/// it – parsing a document and rendering pages, on the main thread and on the
+/// thumbnail workers alike – is serialized here. Only one thread is ever inside
+/// Poppler at a time, which is what prevents the heap corruption a concurrent
+/// render otherwise causes. The lock wraps a single leaf call each time, so it
+/// can never deadlock by re-entrancy. A panic while rendering does not corrupt
+/// Rust state, so the poison is recovered rather than propagated.
+fn with_poppler<T>(f: impl FnOnce() -> T) -> T {
+    static LOCK: Mutex<()> = Mutex::new(());
+    let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    f()
+}
+
 fn load_document(path: &Path) -> Result<(poppler::Document, StrokesByPage), String> {
     let (bytes, strokes) = annot::load_and_strip(path).map_err(|e| e.to_string())?;
     let gbytes = glib::Bytes::from_owned(bytes);
-    let doc = poppler::Document::from_bytes(&gbytes, None).map_err(|e| e.to_string())?;
+    let doc = with_poppler(|| poppler::Document::from_bytes(&gbytes, None)).map_err(|e| e.to_string())?;
     Ok((doc, strokes))
 }
 
@@ -1878,8 +1891,8 @@ fn zoom_cache_valid(st: &DocState, area: &gtk::DrawingArea) -> bool {
     let h = area.height() as f64;
     let sf = area.scale_factor() as f64;
     let ViewPos::Full(n) = st.pos else { return true };
-    let Some(page) = st.doc.page(n as i32) else { return true };
-    let (pw, ph) = page.size();
+    let Some(page) = with_poppler(|| st.doc.page(n as i32)) else { return true };
+    let (pw, ph) = with_poppler(|| page.size());
     let (_, ox, oy) = view_transform(st, w, h, pw, ph);
     st.zoom_cache
         .as_ref()
@@ -1896,8 +1909,8 @@ fn zoom_cache_valid(st: &DocState, area: &gtk::DrawingArea) -> bool {
 
 /// Renders the currently visible zoomed viewport at full resolution.
 fn render_zoom_view(st: &mut DocState, n: usize, w: f64, h: f64, sf: f64) {
-    let Some(page) = st.doc.page(n as i32) else { return };
-    let (pw, ph) = page.size();
+    let Some(page) = with_poppler(|| st.doc.page(n as i32)) else { return };
+    let (pw, ph) = with_poppler(|| page.size());
     let (scale, ox, oy) = view_transform(st, w, h, pw, ph);
     let w_px = (w * sf).ceil() as i32;
     let h_px = (h * sf).ceil() as i32;
@@ -1917,7 +1930,7 @@ fn render_zoom_view(st: &mut DocState, n: usize, w: f64, h: f64, sf: f64) {
         cr.set_source_rgb(1.0, 1.0, 1.0);
         cr.rectangle(0.0, 0.0, pw, ph);
         let _ = cr.fill();
-        page.render(&cr);
+        with_poppler(|| page.render(&cr));
     }
     st.zoom_cache = Some(ZoomSurface {
         zoom: st.zoom,
@@ -1934,8 +1947,8 @@ fn render_zoom_view(st: &mut DocState, n: usize, w: f64, h: f64, sf: f64) {
 /// the full view (half the height, half the page), so one cached bitmap
 /// per page serves both modes.
 fn cache_scale(st: &DocState, n: usize, w: f64, h: f64, sf: f64) -> Option<f64> {
-    let page = st.doc.page(n as i32)?;
-    let (pw, ph) = page.size();
+    let page = with_poppler(|| st.doc.page(n as i32))?;
+    let (pw, ph) = with_poppler(|| page.size());
     let (scale, _, _) = full_layout(w, h, pw, ph);
     Some(scale * sf)
 }
@@ -1950,9 +1963,10 @@ fn cache_valid(st: &DocState, n: usize, w: f64, h: f64, sf: f64) -> bool {
         .unwrap_or(false)
 }
 
-/// Thumbnail worker thread: opens its own Poppler document (Poppler is
-/// not thread-safe, but exclusive use within one thread is fine) and
-/// renders queued pages until the queue is empty or quit is set.
+/// Thumbnail worker thread: opens its own Poppler document and renders queued
+/// pages until the queue is empty or quit is set. Every Poppler call (here and
+/// on the main thread) goes through [`with_poppler`], so no two threads are
+/// ever inside Poppler at once.
 fn thumb_worker(path: PathBuf, shared: Arc<Mutex<ThumbState>>) {
     // The last worker to leave marks the whole job as done.
     let leave = |shared: &Arc<Mutex<ThumbState>>| {
@@ -1964,7 +1978,7 @@ fn thumb_worker(path: PathBuf, shared: Arc<Mutex<ThumbState>>) {
     };
     let doc = glib::filename_to_uri(&path, None)
         .ok()
-        .and_then(|uri| poppler::Document::from_file(uri.as_str(), None).ok());
+        .and_then(|uri| with_poppler(|| poppler::Document::from_file(uri.as_str(), None)).ok());
     let Some(doc) = doc else {
         leave(&shared);
         return;
@@ -2006,8 +2020,8 @@ fn thumb_worker(path: PathBuf, shared: Arc<Mutex<ThumbState>>) {
 
 /// Renders one page at thumbnail size into raw ARGB pixels.
 fn render_thumb(doc: &poppler::Document, n: usize) -> Option<ThumbPixels> {
-    let page = doc.page(n as i32)?;
-    let (pw, ph) = page.size();
+    let page = with_poppler(|| doc.page(n as i32))?;
+    let (pw, ph) = with_poppler(|| page.size());
     let s = THUMB_H / ph;
     let w_px = (pw * s).ceil() as i32;
     let h_px = THUMB_H.ceil() as i32;
@@ -2020,7 +2034,7 @@ fn render_thumb(doc: &poppler::Document, n: usize) -> Option<ThumbPixels> {
         cr.scale(s, s);
         cr.set_source_rgb(1.0, 1.0, 1.0);
         let _ = cr.paint();
-        page.render(&cr);
+        with_poppler(|| page.render(&cr));
     }
     surface.flush();
     let stride = surface.stride();
@@ -2033,8 +2047,8 @@ fn ensure_cached(st: &mut DocState, n: usize, w: f64, h: f64, sf: f64) {
     if cache_valid(st, n, w, h, sf) {
         return;
     }
-    let Some(page) = st.doc.page(n as i32) else { return };
-    let (pw, ph) = page.size();
+    let Some(page) = with_poppler(|| st.doc.page(n as i32)) else { return };
+    let (pw, ph) = with_poppler(|| page.size());
     let Some(s_px) = cache_scale(st, n, w, h, sf) else { return };
     let w_px = (pw * s_px).ceil() as i32;
     let h_px = (ph * s_px).ceil() as i32;
@@ -2049,7 +2063,7 @@ fn ensure_cached(st: &mut DocState, n: usize, w: f64, h: f64, sf: f64) {
         cr.scale(s_px, s_px);
         cr.set_source_rgb(1.0, 1.0, 1.0);
         let _ = cr.paint();
-        page.render(&cr);
+        with_poppler(|| page.render(&cr));
     }
     st.cache.insert(n, CachedPage { s_px, surface });
 }
@@ -2066,8 +2080,8 @@ fn blit_page(cr: &cairo::Context, cached: &CachedPage, ox: f64, oy: f64, sf: f64
 }
 
 fn draw_full_page(cr: &cairo::Context, st: &mut DocState, n: usize, w: f64, h: f64, sf: f64) {
-    let Some(page) = st.doc.page(n as i32) else { return };
-    let (pw, ph) = page.size();
+    let Some(page) = with_poppler(|| st.doc.page(n as i32)) else { return };
+    let (pw, ph) = with_poppler(|| page.size());
     let (scale, ox, oy) = view_transform(st, w, h, pw, ph);
     if st.zoom <= 1.0 {
         ensure_cached(st, n, w, h, sf);
@@ -2118,8 +2132,8 @@ fn draw_half_page(
     y1: f64,
     sf: f64,
 ) {
-    let Some(page) = st.doc.page(n as i32) else { return };
-    let (pw, ph) = page.size();
+    let Some(page) = with_poppler(|| st.doc.page(n as i32)) else { return };
+    let (pw, ph) = with_poppler(|| page.size());
     let region_h = y1 - y0;
     // Half a page in half the area uses the same fit as a full page in the
     // full area (height 2·region_h), so the cached full-view bitmap fits
