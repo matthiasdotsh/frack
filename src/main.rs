@@ -30,10 +30,13 @@ enum SlRow {
 }
 
 /// The setlist currently open in the setlist view / being played, kept so the
-/// viewer's back button returns to it and (later) turning can cross pieces.
+/// viewer's back button returns to it and turning can cross pieces.
 struct Active {
     setlist: setlist::Setlist,
     resolved: Vec<setlist::Resolved>,
+    /// Index (into the entries, comments skipped) of the piece being played,
+    /// or `None` before one is opened. Highlighted in the setlist view.
+    index: Option<usize>,
 }
 
 /// Case-insensitive: all whitespace-separated terms occur in the name.
@@ -276,7 +279,8 @@ fn build_ui(app: &gtk::Application, root_override: Option<PathBuf>) {
 
     // ----- Setlist view (third stack page) -----
     let sl_list = gtk::ListBox::new();
-    sl_list.set_selection_mode(gtk::SelectionMode::None);
+    // Single selection so the piece currently playing can be highlighted.
+    sl_list.set_selection_mode(gtk::SelectionMode::Single);
     let sl_scrolled = gtk::ScrolledWindow::new();
     sl_scrolled.set_child(Some(&sl_list));
     sl_scrolled.set_vexpand(true);
@@ -379,6 +383,7 @@ fn build_ui(app: &gtk::Application, root_override: Option<PathBuf>) {
                 sl_list.remove(&row);
             }
             let mut model: Vec<SlRow> = Vec::new();
+            let mut current_row: Option<gtk::ListBoxRow> = None;
             if let Some(a) = active.borrow().as_ref() {
                 sl_title.set_text(&a.setlist.name);
                 status.set_text(&a.setlist.name);
@@ -397,6 +402,9 @@ fn build_ui(app: &gtk::Application, root_override: Option<PathBuf>) {
                             // the placeholder page you can turn onto.
                             row.set_sensitive(r.exists);
                             sl_list.append(&row);
+                            if a.index == Some(ei) {
+                                current_row = Some(row);
+                            }
                             model.push(SlRow::Entry(ei));
                             ei += 1;
                         }
@@ -404,6 +412,11 @@ fn build_ui(app: &gtk::Application, root_override: Option<PathBuf>) {
                 }
             }
             *sl_rows.borrow_mut() = model;
+            // Highlight the piece currently playing (if any).
+            match &current_row {
+                Some(r) => sl_list.select_row(Some(r)),
+                None => sl_list.unselect_all(),
+            }
             stack.set_visible_child_name("setlist");
             back.set_visible(true);
             pen.set_visible(false);
@@ -442,6 +455,7 @@ fn build_ui(app: &gtk::Application, root_override: Option<PathBuf>) {
                 *active.borrow_mut() = Some(Active {
                     setlist: sl,
                     resolved,
+                    index: None,
                 });
                 show_setlist_view();
             }
@@ -620,22 +634,42 @@ fn build_ui(app: &gtk::Application, root_override: Option<PathBuf>) {
     {
         let sl_rows = sl_rows.clone();
         let active = active.clone();
-        let open_in_viewer = open_in_viewer.clone();
+        let viewer = viewer.clone();
+        let enter_viewer = enter_viewer.clone();
         sl_list.connect_row_activated(move |_, row| {
             let ei = match sl_rows.borrow().get(row.index() as usize) {
                 Some(SlRow::Entry(e)) => Some(*e),
                 _ => None,
             };
-            if let Some(ei) = ei {
-                let target = active
-                    .borrow()
-                    .as_ref()
-                    .and_then(|a| a.resolved.get(ei))
-                    .map(|r| (r.abs.clone(), r.exists));
-                // `active` stays set, so the viewer's back returns here.
-                if let Some((abs, true)) = target {
-                    open_in_viewer(&abs);
+            let Some(ei) = ei else { return };
+            // Build a playlist from the resolved entries and start at `ei`, so
+            // turning past a piece's edge crosses to the neighbour. `active`
+            // stays set, so the viewer's back button returns here.
+            let entries = {
+                let a = active.borrow();
+                let Some(a) = a.as_ref() else { return };
+                if !a.resolved.get(ei).is_some_and(|r| r.exists) {
+                    return; // missing entries stay inert until Stufe 5
                 }
+                a.resolved
+                    .iter()
+                    .map(|r| viewer::PlaylistEntry {
+                        path: r.abs.clone(),
+                    })
+                    .collect::<Vec<_>>()
+            };
+            if viewer.open_playlist(entries, ei).is_ok() {
+                enter_viewer();
+            }
+        });
+    }
+    // Keep the setlist view's highlighted piece in step with the viewer as
+    // turning crosses pieces.
+    {
+        let active = active.clone();
+        viewer.set_on_piece_change(move |i| {
+            if let Some(a) = active.borrow_mut().as_mut() {
+                a.index = Some(i);
             }
         });
     }

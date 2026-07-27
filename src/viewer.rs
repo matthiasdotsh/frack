@@ -196,10 +196,31 @@ pub struct DocState {
     zoom_cache: Option<ZoomSurface>,
 }
 
+/// One entry of a playlist (setlist) the viewer can turn across. More fields
+/// (page range, existence) arrive in later stages.
+#[derive(Clone)]
+pub struct PlaylistEntry {
+    pub path: PathBuf,
+}
+
+/// Callback invoked with the new index when turning crosses into another piece.
+type PieceChangeCb = Rc<RefCell<Option<Box<dyn Fn(usize)>>>>;
+
+/// A setlist opened for turning across its pieces.
+pub struct Playlist {
+    pub entries: Vec<PlaylistEntry>,
+    pub index: usize,
+}
+
 #[derive(Clone)]
 pub struct Viewer {
     pub area: gtk::DrawingArea,
     pub state: Rc<RefCell<Option<DocState>>>,
+    /// The setlist being played, if any: turning past a piece's edge moves to
+    /// the neighbouring entry. `None` for a directly opened file.
+    playlist: Rc<RefCell<Option<Playlist>>>,
+    /// Called with the new index whenever turning crosses into another piece.
+    on_piece_change: PieceChangeCb,
     cfg: Rc<Config>,
     status: gtk::Label,
     pen_button: gtk::ToggleButton,
@@ -294,6 +315,8 @@ impl Viewer {
         let viewer = Viewer {
             area,
             state: Rc::new(RefCell::new(None)),
+            playlist: Rc::new(RefCell::new(None)),
+            on_piece_change: Rc::new(RefCell::new(None)),
             cfg,
             status,
             pen_button,
@@ -337,7 +360,40 @@ impl Viewer {
         &self.nav_actions
     }
 
+    /// Opens a single file directly, discarding any playlist.
     pub fn open(&self, path: &Path) -> Result<(), String> {
+        self.playlist.borrow_mut().take();
+        self.load(path)
+    }
+
+    /// Opens a setlist starting at `index`; turning past a piece's edge then
+    /// crosses to the neighbouring entry.
+    pub fn open_playlist(&self, entries: Vec<PlaylistEntry>, index: usize) -> Result<(), String> {
+        let path = entries
+            .get(index)
+            .map(|e| e.path.clone())
+            .ok_or_else(|| "empty playlist".to_string())?;
+        *self.playlist.borrow_mut() = Some(Playlist { entries, index });
+        let r = self.load(&path);
+        self.notify_piece_change(index);
+        r
+    }
+
+    /// Registers a callback invoked with the new index whenever turning
+    /// crosses into another piece (and when a playlist is first opened).
+    pub fn set_on_piece_change(&self, f: impl Fn(usize) + 'static) {
+        *self.on_piece_change.borrow_mut() = Some(Box::new(f));
+    }
+
+    fn notify_piece_change(&self, index: usize) {
+        if let Some(f) = self.on_piece_change.borrow().as_ref() {
+            f(index);
+        }
+    }
+
+    /// Loads a document into the viewer (shared by direct open and playlist
+    /// turning); does not touch the playlist.
+    fn load(&self, path: &Path) -> Result<(), String> {
         self.close();
         let abs = std::fs::canonicalize(path).map_err(|e| e.to_string())?;
         let (doc, strokes) = load_document(&abs)?;
@@ -750,7 +806,57 @@ impl Viewer {
         self.update_history();
     }
 
+    /// True when the view sits on the last page – nothing further to turn to
+    /// within this document.
+    fn at_end(&self) -> bool {
+        self.state
+            .borrow()
+            .as_ref()
+            .is_some_and(|st| pos_at_end(st.pos, st.n_pages))
+    }
+
+    /// True when the view sits on the first page.
+    fn at_start(&self) -> bool {
+        self.state
+            .borrow()
+            .as_ref()
+            .is_some_and(|st| pos_at_start(st.pos))
+    }
+
+    /// Moves `dir` (+1 / -1) entries in the playlist, opening that piece at its
+    /// first page (forward) or last page (backward). Returns false when there
+    /// is no playlist or no neighbour that way.
+    fn playlist_step(&self, dir: i32) -> bool {
+        let (ni, path) = {
+            let pl = self.playlist.borrow();
+            let Some(pl) = pl.as_ref() else { return false };
+            let Some(ni) = step_index(pl.index, pl.entries.len(), dir) else {
+                return false;
+            };
+            (ni, pl.entries[ni].path.clone())
+        };
+        if let Some(pl) = self.playlist.borrow_mut().as_mut() {
+            pl.index = ni;
+        }
+        // load() flushes and closes the current piece first. Stufe 5 replaces
+        // a failed load with a placeholder page.
+        let _ = self.load(&path);
+        if dir < 0
+            && let Some(st) = self.state.borrow_mut().as_mut()
+        {
+            st.pos = ViewPos::Full(st.n_pages.saturating_sub(1));
+        }
+        self.update_status();
+        self.notify_piece_change(ni);
+        self.area.queue_draw();
+        true
+    }
+
     pub fn forward(&self) {
+        // At the last page, a foot pedal turns on to the next piece.
+        if self.at_end() && self.playlist_step(1) {
+            return;
+        }
         self.flush();
         let mut guard = self.state.borrow_mut();
         let Some(st) = guard.as_mut() else { return };
@@ -770,6 +876,10 @@ impl Viewer {
     }
 
     pub fn backward(&self) {
+        // At the first page, turn back into the previous piece's last page.
+        if self.at_start() && self.playlist_step(-1) {
+            return;
+        }
         self.flush();
         let mut guard = self.state.borrow_mut();
         let Some(st) = guard.as_mut() else { return };
@@ -884,7 +994,13 @@ impl Viewer {
                     ViewPos::Split(n) => format!("Seite {}→{}/{}", n + 1, n + 2, st.n_pages),
                 };
                 let pen = if st.annotate { "  ✎" } else { "" };
-                format!("{name} – {pos}{pen}")
+                let prefix = self
+                    .playlist
+                    .borrow()
+                    .as_ref()
+                    .map(|pl| format!("{}/{} · ", pl.index + 1, pl.entries.len()))
+                    .unwrap_or_default();
+                format!("{prefix}{name} – {pos}{pen}")
             }
         };
         self.status.set_text(&text);
@@ -1542,6 +1658,30 @@ impl Viewer {
     }
 }
 
+/// Whether a view position is the last page of an `n_pages` document – the
+/// point where turning forward crosses into the next setlist piece. A split
+/// view is never the last page (its bottom half is not the final one).
+fn pos_at_end(pos: ViewPos, n_pages: usize) -> bool {
+    pos == ViewPos::Full(n_pages.saturating_sub(1))
+}
+
+/// Whether a view position is the first page – where turning back crosses into
+/// the previous piece.
+fn pos_at_start(pos: ViewPos) -> bool {
+    pos == ViewPos::Full(0)
+}
+
+/// The neighbouring playlist index in direction `dir` (+1 / -1), or `None` at
+/// the ends (so turning clamps instead of wrapping).
+fn step_index(index: usize, len: usize, dir: i32) -> Option<usize> {
+    let ni = index as i32 + dir;
+    if ni < 0 || ni as usize >= len {
+        None
+    } else {
+        Some(ni as usize)
+    }
+}
+
 /// Loads the document for rendering (Poppler) together with its strokes.
 /// The ink annotations are stripped from the copy Poppler sees – frack
 /// draws them itself – so they never render twice.
@@ -2012,6 +2152,31 @@ fn event_source(controller: &gtk::EventController) -> Option<gtk::gdk::InputSour
 mod tests {
     use super::*;
     use lopdf::{dictionary, Object, Stream};
+
+    #[test]
+    fn pos_at_end_only_on_the_last_full_page() {
+        assert!(pos_at_end(ViewPos::Full(1), 2));
+        assert!(!pos_at_end(ViewPos::Full(0), 2));
+        // A split view shows the bottom of page n, never the last page.
+        assert!(!pos_at_end(ViewPos::Split(0), 2));
+        // Single-page piece: its only page is both first and last.
+        assert!(pos_at_end(ViewPos::Full(0), 1));
+    }
+
+    #[test]
+    fn pos_at_start_only_on_the_first_full_page() {
+        assert!(pos_at_start(ViewPos::Full(0)));
+        assert!(!pos_at_start(ViewPos::Full(1)));
+        assert!(!pos_at_start(ViewPos::Split(0)));
+    }
+
+    #[test]
+    fn step_index_clamps_at_the_ends() {
+        assert_eq!(step_index(0, 3, 1), Some(1));
+        assert_eq!(step_index(2, 3, 1), None); // no piece past the last
+        assert_eq!(step_index(1, 3, -1), Some(0));
+        assert_eq!(step_index(0, 3, -1), None); // no piece before the first
+    }
 
     /// Renders the given view position into a PNG, exactly like the
     /// draw func does, so split rendering can be checked headlessly.
