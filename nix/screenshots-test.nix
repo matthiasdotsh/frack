@@ -251,6 +251,17 @@ testers.runNixOSTest {
         park_cursor()
         machine.screenshot("library")
 
+    with subtest("a setlist shows its pieces (a missing one is flagged)"):
+        # The setlist row sits at the top of the library; from the focused
+        # search, one Down moves into the list and Enter opens it.
+        machine.send_key("down")
+        machine.send_key("ret")
+        machine.wait_for_text("(?i)encore")
+        park_cursor()
+        machine.screenshot("setlist")
+        machine.send_key("esc")  # back to the library
+        machine.wait_for_text("(?i)brahms")
+
     with subtest("typing in the search filters the list"):
         # The search entry is focused on startup.
         machine.send_chars("bass")
@@ -314,8 +325,6 @@ testers.runNixOSTest {
             )
 
         retry(ink_visible)
-        park_cursor()
-        machine.screenshot("annotation")
         # Leaving pen mode saves the strokes into the (writable) PDF as
         # ink annotations; later screenshots show them persisted.
         machine.send_key("a")

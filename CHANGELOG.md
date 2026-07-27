@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Setlists: ordered programmes for a rehearsal or concert, kept as plain
+  `.txt` files in `setlists_dir` (default `root_dir/setlists`) — one score
+  per line relative to `root_dir`, `#` for a comment or section, and an
+  optional `#page=` range (e.g. `#page=5-6`, `#page=12-`) to pin an entry to
+  part of a PDF without cutting the file. They appear in their own section of
+  the library, most recent first. Opening one turns across its pieces as if
+  they were a single score — a foot pedal plays the whole programme straight
+  through — while the back button drops to the piece list to jump around in a
+  rehearsal, and the overlay shows your place in the programme. Missing or
+  unreadable entries show a placeholder you can turn past, flagged up front by
+  a warning banner when the setlist opens and a badge in the library.
+
+### Fixed
+
+- A rare crash ("double free or corruption") while rendering pages: Poppler
+  is not thread-safe, so the background thumbnail workers could corrupt the
+  heap when the main thread was rendering at the same time (most likely with
+  large scanned scores). All Poppler access is now serialized.
+
 ## [0.3.0] - 2026-07-26
 
 ### Added

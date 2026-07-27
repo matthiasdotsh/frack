@@ -12,9 +12,9 @@ left to external tools (git-annex, Syncthing).
 
 ## Screenshots
 
-| Library | Freehand annotation |
+| Library | Setlist |
 | --- | --- |
-| ![Library](assets/screenshots/library.png) | ![Annotation](assets/screenshots/annotation.png) |
+| ![Library](assets/screenshots/library.png) | ![Setlist](assets/screenshots/setlist.png) |
 
 | Half-page turn with tuner | Touch overlay (middle tap) |
 | --- | --- |
@@ -207,8 +207,6 @@ annotation types, including hyperlinks.)
 
 ## Setlists
 
-*Planned — documented here for review; not yet implemented.*
-
 A setlist is an ordered programme for a rehearsal or concert: a list of
 pieces you turn through as one, so a foot-pedal page turn at the end of one
 part carries straight on to the top of the next. It doubles as a record of
@@ -259,10 +257,11 @@ tap, for the rehearsal room.
 
 **When something is missing.** If a file a setlist names is not there — a
 typo, a moved score, or one your sync has not brought over yet — frack
-warns you up front: opening the setlist shows which entries are missing,
-well before you are on stage. Turn onto a missing entry while playing and you get a
-placeholder page naming the file, not a crash and not a silent skip, and
-you can page right past it.
+warns you up front: the library marks such a setlist with a warning icon,
+and opening it lists the missing entries, well before you are on stage.
+Turn onto a missing entry while playing and you get a placeholder page
+naming the file, not a crash and not a silent skip, and you can page right
+past it.
 
 ## Roadmap
 
