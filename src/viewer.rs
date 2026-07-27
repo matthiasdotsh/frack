@@ -156,6 +156,10 @@ pub struct DocState {
     pub path: PathBuf,
     pub doc: poppler::Document,
     pub n_pages: usize,
+    /// First/last 0-based page the view is bounded to – a setlist page range,
+    /// or the whole document. Turning and the slider stay within `lo..=hi`.
+    lo: usize,
+    hi: usize,
     pub pos: ViewPos,
     /// Whether finger drawing is on (the pen button). The stylus draws
     /// regardless; this only affects touch and mouse input.
@@ -196,11 +200,20 @@ pub struct DocState {
     zoom_cache: Option<ZoomSurface>,
 }
 
-/// One entry of a playlist (setlist) the viewer can turn across. More fields
-/// (page range, existence) arrive in later stages.
+/// A 1-based, inclusive page range for a playlist entry; `None` on a side is an
+/// open end. Resolved against the document's page count when it opens.
+#[derive(Clone, Copy)]
+pub struct PageRange {
+    pub lo: Option<usize>,
+    pub hi: Option<usize>,
+}
+
+/// One entry of a playlist (setlist) the viewer can turn across.
 #[derive(Clone)]
 pub struct PlaylistEntry {
     pub path: PathBuf,
+    /// Restrict the view to these pages; `None` shows the whole file.
+    pub range: Option<PageRange>,
 }
 
 /// Callback invoked with the new index when turning crosses into another piece.
@@ -375,18 +388,18 @@ impl Viewer {
     /// Opens a single file directly, discarding any playlist.
     pub fn open(&self, path: &Path) -> Result<(), String> {
         self.playlist.borrow_mut().take();
-        self.load(path)
+        self.load(path, None)
     }
 
     /// Opens a setlist starting at `index`; turning past a piece's edge then
     /// crosses to the neighbouring entry.
     pub fn open_playlist(&self, entries: Vec<PlaylistEntry>, index: usize) -> Result<(), String> {
-        let path = entries
+        let entry = entries
             .get(index)
-            .map(|e| e.path.clone())
+            .cloned()
             .ok_or_else(|| "empty playlist".to_string())?;
         *self.playlist.borrow_mut() = Some(Playlist { entries, index });
-        let r = self.load(&path);
+        let r = self.load(&entry.path, entry.range);
         self.notify_piece_change(index);
         r
     }
@@ -404,8 +417,9 @@ impl Viewer {
     }
 
     /// Loads a document into the viewer (shared by direct open and playlist
-    /// turning); does not touch the playlist.
-    fn load(&self, path: &Path) -> Result<(), String> {
+    /// turning); does not touch the playlist. `range` bounds the view to a
+    /// setlist page range (`None` = whole file).
+    fn load(&self, path: &Path, range: Option<PageRange>) -> Result<(), String> {
         self.close();
         let abs = std::fs::canonicalize(path).map_err(|e| e.to_string())?;
         let (doc, strokes) = load_document(&abs)?;
@@ -413,6 +427,7 @@ impl Viewer {
         if n_pages == 0 {
             return Err("PDF has no pages".to_string());
         }
+        let (lo, hi) = bounds_for(range, n_pages);
         // Everything read from the file is already persisted.
         let saved = strokes.iter().map(|(&p, v)| (p, v.len())).collect();
         // Seed the undo history so already-saved strokes are undoable too.
@@ -431,7 +446,9 @@ impl Viewer {
             path: abs,
             doc,
             n_pages,
-            pos: ViewPos::Full(0),
+            lo,
+            hi,
+            pos: ViewPos::Full(lo),
             annotate: false,
             erase: false,
             strokes,
@@ -451,8 +468,11 @@ impl Viewer {
         self.pen_button.set_active(false);
         self.erase_button.set_active(false);
         self.nav_updating.set(true);
-        self.nav_scale.set_range(1.0, n_pages.max(2) as f64);
-        self.nav_scale.set_value(1.0);
+        // The slider spans the visible range only; max(lo+2) keeps min < max
+        // even for a single-page range (goto_page still clamps to lo..=hi).
+        self.nav_scale
+            .set_range((lo + 1) as f64, (hi + 1).max(lo + 2) as f64);
+        self.nav_scale.set_value((lo + 1) as f64);
         self.nav_updating.set(false);
         self.nav_box.set_visible(false);
         self.update_status();
@@ -518,7 +538,7 @@ impl Viewer {
         self.flush();
         let mut guard = self.state.borrow_mut();
         let Some(st) = guard.as_mut() else { return };
-        let page = page.min(st.n_pages - 1);
+        let page = page.clamp(st.lo, st.hi);
         if st.pos == ViewPos::Full(page) {
             return;
         }
@@ -572,13 +592,13 @@ impl Viewer {
                 return;
             }
             let target = scale.value().round() as usize;
-            let n = v
+            let (lo, hi, n) = v
                 .state
                 .borrow()
                 .as_ref()
-                .map(|st| st.n_pages)
-                .unwrap_or(1);
-            let target = target.clamp(1, n);
+                .map(|st| (st.lo, st.hi, st.n_pages))
+                .unwrap_or((0, 0, 1));
+            let target = target.clamp(lo + 1, hi + 1);
             v.nav_label.set_text(&format!("{target} / {n}"));
             v.show_preview(target - 1, n);
             // Debounce: only jump once the value has settled briefly, so
@@ -824,39 +844,40 @@ impl Viewer {
         self.state
             .borrow()
             .as_ref()
-            .is_some_and(|st| pos_at_end(st.pos, st.n_pages))
+            .is_some_and(|st| pos_at_end(st.pos, st.hi))
     }
 
-    /// True when the view sits on the first page.
+    /// True when the view sits on the first page of the range.
     fn at_start(&self) -> bool {
         self.state
             .borrow()
             .as_ref()
-            .is_some_and(|st| pos_at_start(st.pos))
+            .is_some_and(|st| pos_at_start(st.pos, st.lo))
     }
 
     /// Moves `dir` (+1 / -1) entries in the playlist, opening that piece at its
     /// first page (forward) or last page (backward). Returns false when there
     /// is no playlist or no neighbour that way.
     fn playlist_step(&self, dir: i32) -> bool {
-        let (ni, path) = {
+        let (ni, path, range) = {
             let pl = self.playlist.borrow();
             let Some(pl) = pl.as_ref() else { return false };
             let Some(ni) = step_index(pl.index, pl.entries.len(), dir) else {
                 return false;
             };
-            (ni, pl.entries[ni].path.clone())
+            let e = &pl.entries[ni];
+            (ni, e.path.clone(), e.range)
         };
         if let Some(pl) = self.playlist.borrow_mut().as_mut() {
             pl.index = ni;
         }
         // load() flushes and closes the current piece first. Stufe 5 replaces
         // a failed load with a placeholder page.
-        let _ = self.load(&path);
+        let _ = self.load(&path, range);
         if dir < 0
             && let Some(st) = self.state.borrow_mut().as_mut()
         {
-            st.pos = ViewPos::Full(st.n_pages.saturating_sub(1));
+            st.pos = ViewPos::Full(st.hi);
         }
         self.update_status();
         self.notify_piece_change(ni);
@@ -875,8 +896,8 @@ impl Viewer {
         let editing = st.annotate || st.erase;
         st.pos = match st.pos {
             // While editing, turn whole pages (drawing/erasing needs one).
-            ViewPos::Full(n) if editing && n + 1 < st.n_pages => ViewPos::Full(n + 1),
-            ViewPos::Full(n) if !editing && n + 1 < st.n_pages => ViewPos::Split(n),
+            ViewPos::Full(n) if editing && n < st.hi => ViewPos::Full(n + 1),
+            ViewPos::Full(n) if !editing && n < st.hi => ViewPos::Split(n),
             ViewPos::Split(n) => ViewPos::Full(n + 1),
             other => other,
         };
@@ -897,8 +918,8 @@ impl Viewer {
         let Some(st) = guard.as_mut() else { return };
         let editing = st.annotate || st.erase;
         st.pos = match st.pos {
-            ViewPos::Full(n) if editing && n > 0 => ViewPos::Full(n - 1),
-            ViewPos::Full(n) if !editing && n > 0 => ViewPos::Split(n - 1),
+            ViewPos::Full(n) if editing && n > st.lo => ViewPos::Full(n - 1),
+            ViewPos::Full(n) if !editing && n > st.lo => ViewPos::Split(n - 1),
             ViewPos::Split(n) => ViewPos::Full(n),
             other => other,
         };
@@ -1677,17 +1698,33 @@ impl Viewer {
     }
 }
 
-/// Whether a view position is the last page of an `n_pages` document – the
-/// point where turning forward crosses into the next setlist piece. A split
-/// view is never the last page (its bottom half is not the final one).
-fn pos_at_end(pos: ViewPos, n_pages: usize) -> bool {
-    pos == ViewPos::Full(n_pages.saturating_sub(1))
+/// Whether a view position is the last page of the range (`hi`) – the point
+/// where turning forward crosses into the next setlist piece. A split view is
+/// never the last page (its bottom half is not the final one).
+fn pos_at_end(pos: ViewPos, hi: usize) -> bool {
+    pos == ViewPos::Full(hi)
 }
 
-/// Whether a view position is the first page – where turning back crosses into
-/// the previous piece.
-fn pos_at_start(pos: ViewPos) -> bool {
-    pos == ViewPos::Full(0)
+/// Whether a view position is the first page of the range (`lo`) – where
+/// turning back crosses into the previous piece.
+fn pos_at_start(pos: ViewPos, lo: usize) -> bool {
+    pos == ViewPos::Full(lo)
+}
+
+/// Resolves a 1-based, inclusive page range against a document's page count
+/// into 0-based `(lo, hi)` bounds, clamped to the document. An open side falls
+/// back to the first/last page; `None` means the whole document. A range wholly
+/// past the end clamps to the last page (Stufe 5 turns this into a placeholder).
+fn bounds_for(range: Option<PageRange>, n_pages: usize) -> (usize, usize) {
+    let last = n_pages.saturating_sub(1);
+    match range {
+        None => (0, last),
+        Some(r) => {
+            let lo = r.lo.map(|n| n.saturating_sub(1)).unwrap_or(0).min(last);
+            let hi = r.hi.map(|n| n.saturating_sub(1)).unwrap_or(last).min(last);
+            (lo, hi.max(lo))
+        }
+    }
 }
 
 /// The neighbouring playlist index in direction `dir` (+1 / -1), or `None` at
@@ -2173,20 +2210,19 @@ mod tests {
     use lopdf::{dictionary, Object, Stream};
 
     #[test]
-    fn pos_at_end_only_on_the_last_full_page() {
-        assert!(pos_at_end(ViewPos::Full(1), 2));
-        assert!(!pos_at_end(ViewPos::Full(0), 2));
+    fn pos_at_end_only_on_the_last_page_of_the_range() {
+        assert!(pos_at_end(ViewPos::Full(1), 1)); // hi = 1
+        assert!(!pos_at_end(ViewPos::Full(0), 1));
         // A split view shows the bottom of page n, never the last page.
-        assert!(!pos_at_end(ViewPos::Split(0), 2));
-        // Single-page piece: its only page is both first and last.
-        assert!(pos_at_end(ViewPos::Full(0), 1));
+        assert!(!pos_at_end(ViewPos::Split(0), 1));
     }
 
     #[test]
-    fn pos_at_start_only_on_the_first_full_page() {
-        assert!(pos_at_start(ViewPos::Full(0)));
-        assert!(!pos_at_start(ViewPos::Full(1)));
-        assert!(!pos_at_start(ViewPos::Split(0)));
+    fn pos_at_start_only_on_the_first_page_of_the_range() {
+        // A ranged excerpt starting at page 3 (lo = 2).
+        assert!(pos_at_start(ViewPos::Full(2), 2));
+        assert!(!pos_at_start(ViewPos::Full(0), 2));
+        assert!(!pos_at_start(ViewPos::Split(2), 2));
     }
 
     #[test]
@@ -2195,6 +2231,18 @@ mod tests {
         assert_eq!(step_index(2, 3, 1), None); // no piece past the last
         assert_eq!(step_index(1, 3, -1), Some(0));
         assert_eq!(step_index(0, 3, -1), None); // no piece before the first
+    }
+
+    #[test]
+    fn bounds_for_resolves_and_clamps_ranges() {
+        let r = |lo, hi| Some(PageRange { lo, hi });
+        assert_eq!(bounds_for(None, 3), (0, 2)); // whole document
+        assert_eq!(bounds_for(r(Some(2), Some(2)), 3), (1, 1)); // single page 2
+        assert_eq!(bounds_for(r(Some(1), Some(2)), 3), (0, 1)); // 1-2
+        assert_eq!(bounds_for(r(Some(2), None), 3), (1, 2)); // 2- (to end)
+        assert_eq!(bounds_for(r(None, Some(2)), 3), (0, 1)); // -2 (from start)
+        // Wholly past the end: clamps to the last page (Stufe 5: placeholder).
+        assert_eq!(bounds_for(r(Some(50), None), 2), (1, 1));
     }
 
     /// Renders the given view position into a PNG, exactly like the
@@ -2265,6 +2313,8 @@ mod tests {
             path: pdf.clone(),
             doc,
             n_pages: 2,
+            lo: 0,
+            hi: 1,
             pos: ViewPos::Split(0),
             annotate: false,
             erase: false,

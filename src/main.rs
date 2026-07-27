@@ -47,6 +47,15 @@ fn setlist_matches(name: &str, query: &str) -> bool {
         .all(|t| hay.contains(&t.to_lowercase()))
 }
 
+/// Converts a parsed setlist range into the viewer's range. An invalid range
+/// falls back to the whole file for now (Stufe 5 turns it into a placeholder).
+fn to_viewer_range(range: Option<setlist::PageRange>) -> Option<viewer::PageRange> {
+    match range {
+        Some(setlist::PageRange::Valid { lo, hi }) => Some(viewer::PageRange { lo, hi }),
+        _ => None,
+    }
+}
+
 /// A short "(S. …)" hint for a page range, for display in the setlist view.
 fn range_hint(range: &Option<setlist::PageRange>) -> String {
     match range {
@@ -655,6 +664,7 @@ fn build_ui(app: &gtk::Application, root_override: Option<PathBuf>) {
                     .iter()
                     .map(|r| viewer::PlaylistEntry {
                         path: r.abs.clone(),
+                        range: to_viewer_range(r.range),
                     })
                     .collect::<Vec<_>>()
             };
