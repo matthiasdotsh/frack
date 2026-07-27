@@ -214,6 +214,11 @@ pub struct PlaylistEntry {
     pub path: PathBuf,
     /// Restrict the view to these pages; `None` shows the whole file.
     pub range: Option<PageRange>,
+    /// Known-broken before opening (missing file or an invalid range): shows a
+    /// placeholder page instead of loading.
+    pub broken: bool,
+    /// Human label (relative path) for the status line and placeholder page.
+    pub label: String,
 }
 
 /// Callback invoked with the new index when turning crosses into another piece.
@@ -234,6 +239,9 @@ pub struct Viewer {
     playlist: Rc<RefCell<Option<Playlist>>>,
     /// Called with the new index whenever turning crosses into another piece.
     on_piece_change: PieceChangeCb,
+    /// Label of a missing/broken setlist entry shown as a placeholder page;
+    /// `None` when a real document (or nothing) is shown.
+    placeholder: Rc<RefCell<Option<String>>>,
     cfg: Rc<Config>,
     status: gtk::Label,
     pen_button: gtk::ToggleButton,
@@ -341,6 +349,7 @@ impl Viewer {
             state: Rc::new(RefCell::new(None)),
             playlist: Rc::new(RefCell::new(None)),
             on_piece_change: Rc::new(RefCell::new(None)),
+            placeholder: Rc::new(RefCell::new(None)),
             cfg,
             status,
             pen_button,
@@ -399,9 +408,28 @@ impl Viewer {
             .cloned()
             .ok_or_else(|| "empty playlist".to_string())?;
         *self.playlist.borrow_mut() = Some(Playlist { entries, index });
-        let r = self.load(&entry.path, entry.range);
+        self.open_entry(&entry);
         self.notify_piece_change(index);
-        r
+        Ok(())
+    }
+
+    /// Opens a playlist entry: a real document, or a placeholder page when it is
+    /// missing, unreadable, or its range lies past the end of the file.
+    fn open_entry(&self, entry: &PlaylistEntry) {
+        if entry.broken || self.load(&entry.path, entry.range).is_err() {
+            self.set_placeholder(&entry.label);
+        }
+    }
+
+    /// Shows a placeholder page for a missing/broken entry (never crashes or
+    /// silently skips – you can turn right past it).
+    fn set_placeholder(&self, label: &str) {
+        self.close(); // flush & drop the previous piece
+        *self.placeholder.borrow_mut() = Some(label.to_string());
+        self.pen_button.set_active(false);
+        self.erase_button.set_active(false);
+        self.update_status();
+        self.area.queue_draw();
     }
 
     /// Registers a callback invoked with the new index whenever turning
@@ -426,6 +454,10 @@ impl Viewer {
         let n_pages = doc.n_pages().max(0) as usize;
         if n_pages == 0 {
             return Err("PDF has no pages".to_string());
+        }
+        // A range whose first page is past the end is treated as broken.
+        if range_past_end(range, n_pages) {
+            return Err("page range past the end of the document".to_string());
         }
         let (lo, hi) = bounds_for(range, n_pages);
         // Everything read from the file is already persisted.
@@ -787,6 +819,7 @@ impl Viewer {
         self.flush();
         self.stop_thumbs();
         *self.state.borrow_mut() = None;
+        self.placeholder.borrow_mut().take();
         self.nav_box.set_visible(false);
         self.update_history();
         self.area.queue_draw();
@@ -859,21 +892,19 @@ impl Viewer {
     /// first page (forward) or last page (backward). Returns false when there
     /// is no playlist or no neighbour that way.
     fn playlist_step(&self, dir: i32) -> bool {
-        let (ni, path, range) = {
+        let (ni, entry) = {
             let pl = self.playlist.borrow();
             let Some(pl) = pl.as_ref() else { return false };
             let Some(ni) = step_index(pl.index, pl.entries.len(), dir) else {
                 return false;
             };
-            let e = &pl.entries[ni];
-            (ni, e.path.clone(), e.range)
+            (ni, pl.entries[ni].clone())
         };
         if let Some(pl) = self.playlist.borrow_mut().as_mut() {
             pl.index = ni;
         }
-        // load() flushes and closes the current piece first. Stufe 5 replaces
-        // a failed load with a placeholder page.
-        let _ = self.load(&path, range);
+        self.open_entry(&entry);
+        // Turning back lands on the previous piece's last page.
         if dir < 0
             && let Some(st) = self.state.borrow_mut().as_mut()
         {
@@ -886,7 +917,12 @@ impl Viewer {
     }
 
     pub fn forward(&self) {
-        // At the last page, a foot pedal turns on to the next piece.
+        // On a placeholder, or at the last page, a foot pedal turns on to the
+        // next piece.
+        if self.placeholder.borrow().is_some() {
+            self.playlist_step(1);
+            return;
+        }
         if self.at_end() && self.playlist_step(1) {
             return;
         }
@@ -909,7 +945,12 @@ impl Viewer {
     }
 
     pub fn backward(&self) {
-        // At the first page, turn back into the previous piece's last page.
+        // On a placeholder, or at the first page, turn back into the previous
+        // piece's last page.
+        if self.placeholder.borrow().is_some() {
+            self.playlist_step(-1);
+            return;
+        }
         if self.at_start() && self.playlist_step(-1) {
             return;
         }
@@ -1015,10 +1056,24 @@ impl Viewer {
     pub fn update_status(&self) {
         let guard = self.state.borrow();
         let text = match guard.as_ref() {
-            None => {
-                self.overlay_title.set_visible(false);
-                "Bibliothek".to_string()
-            }
+            None => match self.placeholder.borrow().as_ref() {
+                Some(label) => {
+                    let prefix = self
+                        .playlist
+                        .borrow()
+                        .as_ref()
+                        .map(|pl| format!("{}/{} · ", pl.index + 1, pl.entries.len()))
+                        .unwrap_or_default();
+                    let t = format!("{prefix}fehlt: {label}");
+                    self.overlay_title.set_text(&t);
+                    self.overlay_title.set_visible(true);
+                    t
+                }
+                None => {
+                    self.overlay_title.set_visible(false);
+                    "Bibliothek".to_string()
+                }
+            },
             Some(st) => {
                 let name = st
                     .path
@@ -1119,6 +1174,13 @@ impl Viewer {
             // bars (most visible for a portrait page on a portrait screen).
             cr.set_source_rgb(1.0, 1.0, 1.0);
             let _ = cr.paint();
+            // A missing/broken setlist entry: draw its placeholder and stop.
+            if v.state.borrow().is_none() {
+                if let Some(label) = v.placeholder.borrow().as_ref() {
+                    draw_placeholder(cr, w, h, label);
+                }
+                return;
+            }
             {
                 let mut guard = v.state.borrow_mut();
                 let Some(st) = guard.as_mut() else { return };
@@ -1698,6 +1760,22 @@ impl Viewer {
     }
 }
 
+/// Draws the placeholder page for a missing/broken setlist entry: a heading
+/// and the entry's label, centred on the paper-white area.
+fn draw_placeholder(cr: &cairo::Context, w: f64, h: f64, label: &str) {
+    cr.set_source_rgb(0.5, 0.5, 0.5);
+    cr.select_font_face("sans-serif", cairo::FontSlant::Normal, cairo::FontWeight::Normal);
+    let centered = |text: &str, size: f64, y: f64| {
+        cr.set_font_size(size);
+        if let Ok(ext) = cr.text_extents(text) {
+            cr.move_to((w - ext.width()) / 2.0 - ext.x_bearing(), y);
+            let _ = cr.show_text(text);
+        }
+    };
+    centered("Nicht gefunden:", 26.0, h / 2.0 - 12.0);
+    centered(label, 20.0, h / 2.0 + 22.0);
+}
+
 /// Whether a view position is the last page of the range (`hi`) – the point
 /// where turning forward crosses into the next setlist piece. A split view is
 /// never the last page (its bottom half is not the final one).
@@ -1725,6 +1803,12 @@ fn bounds_for(range: Option<PageRange>, n_pages: usize) -> (usize, usize) {
             (lo, hi.max(lo))
         }
     }
+}
+
+/// Whether a range starts past the last page, so none of it is in the file –
+/// treated as broken (placeholder page), not clamped.
+fn range_past_end(range: Option<PageRange>, n_pages: usize) -> bool {
+    matches!(range, Some(r) if r.lo.is_some_and(|l| l > n_pages))
 }
 
 /// The neighbouring playlist index in direction `dir` (+1 / -1), or `None` at
@@ -2241,8 +2325,19 @@ mod tests {
         assert_eq!(bounds_for(r(Some(1), Some(2)), 3), (0, 1)); // 1-2
         assert_eq!(bounds_for(r(Some(2), None), 3), (1, 2)); // 2- (to end)
         assert_eq!(bounds_for(r(None, Some(2)), 3), (0, 1)); // -2 (from start)
-        // Wholly past the end: clamps to the last page (Stufe 5: placeholder).
+        // Wholly past the end: clamps to the last page (but flagged broken
+        // below, so it becomes a placeholder rather than showing that page).
         assert_eq!(bounds_for(r(Some(50), None), 2), (1, 1));
+    }
+
+    #[test]
+    fn range_past_end_detects_out_of_bounds_starts() {
+        let r = |lo, hi| Some(PageRange { lo, hi });
+        assert!(range_past_end(r(Some(50), None), 2)); // starts at 50 in 2 pages
+        assert!(range_past_end(r(Some(3), Some(5)), 2));
+        assert!(!range_past_end(r(Some(2), None), 2)); // last page, still inside
+        assert!(!range_past_end(r(None, Some(50)), 2)); // open start clamps, inside
+        assert!(!range_past_end(None, 2));
     }
 
     /// Renders the given view position into a PNG, exactly like the

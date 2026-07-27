@@ -665,6 +665,9 @@ fn build_ui(app: &gtk::Application, root_override: Option<PathBuf>) {
                     .map(|r| viewer::PlaylistEntry {
                         path: r.abs.clone(),
                         range: to_viewer_range(r.range),
+                        broken: !r.exists
+                            || matches!(r.range, Some(setlist::PageRange::Invalid)),
+                        label: r.rel.clone(),
                     })
                     .collect::<Vec<_>>()
             };
